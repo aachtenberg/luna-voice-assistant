@@ -1,0 +1,48 @@
+#Known Topics
+
+#Status topics (device state, uptime, camera health):
+
+surveillance/status
+surveillance/Entrance Door/status
+surveillance/EntranceDoor/status
+surveillance/EntranceCam/status
+surveillance/Surveillance Cam/status
+surveillance/Family Room Cam/status
+surveillance/FamilyRoom/status
+surveillance/FrontHall/status
+surveillance/IDKCam/status
+surveillance/Garage Cam/status
+surveillance/LivingRoom/status
+surveillance/Kitchen/status
+surveillance/Entrance/status
+
+#Metrics topics (timeseries data, resource usage):
+
+surveillance/Entrance Door/metrics
+surveillance/EntranceDoor/metrics
+surveillance/EntranceCam/metrics
+surveillance/Surveillance Cam/metrics
+surveillance/Family Room Cam/metrics
+surveillance/FamilyRoom/metrics
+surveillance/FrontHall/metrics
+surveillance/IDKCam/metrics
+surveillance/Garage Cam/metrics
+surveillance/LivingRoom/metrics
+surveillance/Kitchen/metrics
+surveillance/Entrance/metrics
+surveillance/metrics
+
+#Temperature/Environmental Sensor Topics
+#Status topics:
+
+esp-sensor-hub/Big-Garage/status
+esp-sensor-hub/Temp-Sensor/status
+esp-sensor-hub/Small-Garage/status
+esp-sensor-hub/Spa/status
+esp-sensor-hub/Pump-House/status
+esp-sensor-hub/Main-Cottage/status
+esp-sensor-hub/Sauna/status
+esp-sensor-hub/Mobile-Temp-Sensor/status
+esp-sensor-hub/Pump-House-New/status
+esp-sensor-hub/Weather-Station-Main/status
+esp-sensor-hub/Shack-ICF/status
