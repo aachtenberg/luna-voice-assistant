@@ -50,8 +50,33 @@ Self-hosted voice assistant replacing Alexa with local/cloud LLMs, smart home co
 ### Compute Node (Optional - for local LLM)
 | Component | Model | Notes |
 |-----------|-------|-------|
-| GPU | NVIDIA RTX 5080 | Any CUDA GPU works for Ollama |
+| GPU | AMD Radeon RX 7900 XTX | 24GB VRAM; NVIDIA/AMD/Intel Arc all work |
+| CPU | AMD Ryzen 7 7800X3D | |
+| RAM | 32GB DDR5 | |
 | OS | Windows 11 + WSL2 | Or native Linux |
+
+**GPU Recommendations:**
+- **NVIDIA**: Best compatibility with Ollama/CUDA. RTX 3060 12GB+ works well.
+- **AMD**: Works with ROCm. 7900 XTX (24GB) handles large models easily.
+- **Intel Arc**: Experimental support in Ollama.
+- **CPU-only**: Possible but slow. 32GB+ RAM recommended for 7B models.
+
+### LLM & Speech Models
+| Service | Model | Where it runs |
+|---------|-------|---------------|
+| LLM (cloud) | Claude 3.5 Haiku | Anthropic API |
+| LLM (local) | Qwen 2.5 14B | Ollama on server |
+| STT | faster-whisper large-v3 | Server (CUDA) |
+| TTS | Piper en_US-lessac-medium | Pi (local) |
+| Wake word | OpenWakeWord (custom) | Pi (local) |
+
+### Supporting Services
+| Service | Purpose | Where it runs |
+|---------|---------|---------------|
+| SearXNG | Web search | Docker on server |
+| InfluxDB 3 | Temperature sensors | Docker on server |
+| Prometheus | System metrics | Docker on server |
+| MQTT (Mosquitto) | Timer notifications | Docker on server |
 
 ### Smart Home Devices
 | Device | Model | Protocol |
