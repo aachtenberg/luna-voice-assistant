@@ -286,13 +286,14 @@ def cancel_timer(name: str = "") -> str:
         return f"Couldn't find a timer matching '{name}'."
 
 
-def list_timers() -> str:
+def list_timers(**kwargs) -> str:
     """
     List all active timers and recently expired ones.
 
     Returns:
         List of active timers with remaining time, plus recently expired
     """
+    # Accept **kwargs to handle Ollama sending empty arguments
     _cleanup_expired()
 
     with _lock:
