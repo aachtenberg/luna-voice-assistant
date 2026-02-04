@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import threading
 from fastapi import FastAPI, Response
 from pydantic import BaseModel
 from llm import get_provider
@@ -20,6 +21,9 @@ from logging_config import setup_logging
 
 # Setup structured logging (JSON for Loki, plain text if LOG_FORMAT=text)
 log = setup_logging(json_output=os.getenv("LOG_FORMAT", "text") != "text")
+
+# Keepalive interval in seconds (3 minutes)
+KEEPALIVE_INTERVAL = 180
 
 app = FastAPI(title="Voice Assistant Brain")
 
@@ -138,3 +142,44 @@ def metrics():
 
 # Set current provider gauge
 CURRENT_PROVIDER.labels(provider=LLM_PROVIDER).set(1)
+
+
+def _keepalive_loop():
+    """Background thread to keep LLM model loaded in memory."""
+    import httpx
+
+    while True:
+        time.sleep(KEEPALIVE_INTERVAL)
+        try:
+            if LLM_PROVIDER == "anthropic" and hasattr(llm, 'client') and hasattr(llm.client, 'messages'):
+                # Anthropic: count tokens on a minimal message
+                llm.client.messages.count_tokens(
+                    model=llm.model,
+                    messages=[{"role": "user", "content": "ping"}]
+                )
+            elif LLM_PROVIDER == "ollama" and hasattr(llm, 'url'):
+                # Ollama: do a tiny inference to keep model loaded in GPU memory
+                httpx.post(
+                    f"{llm.url}/api/generate",
+                    json={
+                        "model": llm.model,
+                        "prompt": "hi",
+                        "stream": False,
+                        "options": {"num_predict": 1},  # Generate just 1 token
+                        "keep_alive": -1  # Keep model loaded indefinitely
+                    },
+                    timeout=30.0
+                )
+            elif LLM_PROVIDER == "groq" and hasattr(llm, 'client'):
+                # Groq: list models
+                llm.client.models.list()
+
+            log.debug("Keepalive ping sent", extra={"event": "keepalive", "provider": LLM_PROVIDER})
+        except Exception as e:
+            log.warning(f"Keepalive ping failed: {e}", extra={"event": "keepalive_error", "provider": LLM_PROVIDER})
+
+
+# Start keepalive thread
+keepalive_thread = threading.Thread(target=_keepalive_loop, daemon=True)
+keepalive_thread.start()
+log.info(f"Keepalive thread started (interval: {KEEPALIVE_INTERVAL}s)", extra={"event": "keepalive_started", "provider": LLM_PROVIDER})
