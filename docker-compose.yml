@@ -9,6 +9,8 @@ services:
       - ./brain/.env
     environment:
       - TZ=America/Toronto
+    volumes:
+      - ./brain/data:/app/data
 
   # Piper TTS container (optional - currently using local binary instead)
   # piper:

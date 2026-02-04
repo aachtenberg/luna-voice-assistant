@@ -20,8 +20,10 @@ _lock = threading.Lock()
 # MQTT topic for timer announcements
 TIMER_TOPIC = "voice-assistant/timer"
 
-# Persistence file path
-TIMERS_FILE = Path(__file__).parent.parent / "timers.json"
+# Persistence file path - use data directory for Docker volume mount
+DATA_DIR = Path(__file__).parent.parent / "data"
+DATA_DIR.mkdir(exist_ok=True)
+TIMERS_FILE = DATA_DIR / "timers.json"
 
 # How long to keep expired timers (seconds)
 EXPIRED_RETENTION = 1800  # 30 minutes
