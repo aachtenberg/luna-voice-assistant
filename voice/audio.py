@@ -45,7 +45,7 @@ class AudioRecorder:
         # Flush buffer even if stream was already open
         if flush_buffer and self.stream:
             chunk_size = int(self.sample_rate * 0.08)
-            for _ in range(10):  # Discard ~0.8 seconds of buffered audio
+            for _ in range(15):  # Discard ~1.2 seconds of buffered audio
                 try:
                     self.stream.read(chunk_size)
                 except:

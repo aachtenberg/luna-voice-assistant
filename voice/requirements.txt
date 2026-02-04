@@ -1,6 +1,9 @@
 openwakeword
+pvporcupine
 sounddevice
 numpy
 scipy
 httpx
 python-dotenv
+paho-mqtt
+prometheus-client
