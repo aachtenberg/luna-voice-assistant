@@ -3,6 +3,8 @@
 import threading
 import time
 import json
+import os
+from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import paho.mqtt.publish as mqtt_publish_msg
@@ -10,11 +12,121 @@ from config import MQTT_BROKER, MQTT_PORT
 
 # Store active timers: {timer_id: {"name": str, "end_time": datetime, "thread": Thread}}
 ACTIVE_TIMERS = {}
+# Store recently expired timers for 30 minutes: {timer_id: {"name": str, "expired_at": datetime}}
+EXPIRED_TIMERS = {}
 _timer_counter = 0
 _lock = threading.Lock()
 
 # MQTT topic for timer announcements
 TIMER_TOPIC = "voice-assistant/timer"
+
+# Persistence file path
+TIMERS_FILE = Path(__file__).parent.parent / "timers.json"
+
+# How long to keep expired timers (seconds)
+EXPIRED_RETENTION = 1800  # 30 minutes
+
+
+def _save_timers():
+    """Save active timers to disk."""
+    with _lock:
+        data = {
+            "counter": _timer_counter,
+            "active": {
+                tid: {
+                    "name": t["name"],
+                    "end_time": t["end_time"].isoformat()
+                }
+                for tid, t in ACTIVE_TIMERS.items()
+            },
+            "expired": {
+                tid: {
+                    "name": t["name"],
+                    "expired_at": t["expired_at"].isoformat()
+                }
+                for tid, t in EXPIRED_TIMERS.items()
+            }
+        }
+
+    try:
+        with open(TIMERS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[Timer] Failed to save timers: {e}")
+
+
+def _load_timers():
+    """Load timers from disk and restart active ones."""
+    global _timer_counter, ACTIVE_TIMERS, EXPIRED_TIMERS
+
+    if not TIMERS_FILE.exists():
+        return
+
+    try:
+        with open(TIMERS_FILE) as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"[Timer] Failed to load timers: {e}")
+        return
+
+    _timer_counter = data.get("counter", 0)
+    now = datetime.now(ZoneInfo("America/Toronto"))
+
+    # Restore active timers
+    for tid, t in data.get("active", {}).items():
+        end_time = datetime.fromisoformat(t["end_time"])
+        remaining = (end_time - now).total_seconds()
+
+        if remaining > 0:
+            # Timer still has time left - restart it
+            timer_thread = threading.Timer(remaining, _timer_callback, args=[tid, t["name"]])
+            timer_thread.daemon = True
+            timer_thread.start()
+
+            ACTIVE_TIMERS[tid] = {
+                "name": t["name"],
+                "end_time": end_time,
+                "thread": timer_thread
+            }
+            print(f"[Timer] Restored timer '{t['name']}' with {int(remaining)}s remaining")
+        else:
+            # Timer expired while we were down - move to expired
+            EXPIRED_TIMERS[tid] = {
+                "name": t["name"],
+                "expired_at": end_time
+            }
+            print(f"[Timer] Timer '{t['name']}' expired while service was down")
+
+    # Restore expired timers (clean up old ones)
+    for tid, t in data.get("expired", {}).items():
+        expired_at = datetime.fromisoformat(t["expired_at"])
+        age = (now - expired_at).total_seconds()
+
+        if age < EXPIRED_RETENTION:
+            EXPIRED_TIMERS[tid] = {
+                "name": t["name"],
+                "expired_at": expired_at
+            }
+
+    _save_timers()  # Clean up any expired ones we didn't restore
+
+
+def _cleanup_expired():
+    """Remove expired timers older than retention period."""
+    now = datetime.now(ZoneInfo("America/Toronto"))
+    to_remove = []
+
+    with _lock:
+        for tid, t in EXPIRED_TIMERS.items():
+            age = (now - t["expired_at"]).total_seconds()
+            if age >= EXPIRED_RETENTION:
+                to_remove.append(tid)
+
+        for tid in to_remove:
+            del EXPIRED_TIMERS[tid]
+
+    if to_remove:
+        _save_timers()
 
 
 def _parse_duration(duration_str: str) -> int:
@@ -49,11 +161,20 @@ def _parse_duration(duration_str: str) -> int:
 def _timer_callback(timer_id: str, name: str):
     """Called when timer expires."""
     print(f"[Timer] Timer '{name}' expired!")
+    now = datetime.now(ZoneInfo("America/Toronto"))
 
-    # Remove from active timers
+    # Move from active to expired
     with _lock:
         if timer_id in ACTIVE_TIMERS:
             del ACTIVE_TIMERS[timer_id]
+
+        EXPIRED_TIMERS[timer_id] = {
+            "name": name,
+            "expired_at": now
+        }
+
+    _save_timers()
+    _cleanup_expired()
 
     # Announce via MQTT
     announcement = f"Timer complete: {name}" if name else "Your timer is done"
@@ -105,6 +226,8 @@ def set_timer(duration: str, name: str = "") -> str:
             "thread": timer_thread
         }
 
+    _save_timers()
+
     # Format confirmation
     if seconds < 60:
         duration_text = f"{seconds} seconds"
@@ -155,6 +278,7 @@ def cancel_timer(name: str = "") -> str:
             timer_to_cancel["thread"].cancel()
             timer_name = timer_to_cancel["name"]
             del ACTIVE_TIMERS[timer_id_to_cancel]
+            _save_timers()
             return f"Cancelled timer: {timer_name}"
 
         return f"Couldn't find a timer matching '{name}'."
@@ -162,36 +286,62 @@ def cancel_timer(name: str = "") -> str:
 
 def list_timers() -> str:
     """
-    List all active timers.
+    List all active timers and recently expired ones.
 
     Returns:
-        List of active timers with remaining time
+        List of active timers with remaining time, plus recently expired
     """
+    _cleanup_expired()
+
     with _lock:
-        if not ACTIVE_TIMERS:
-            return "No active timers."
-
         now = datetime.now(ZoneInfo("America/Toronto"))
-        timer_list = []
+        results = []
 
-        for timer in ACTIVE_TIMERS.values():
-            remaining = timer["end_time"] - now
-            remaining_secs = int(remaining.total_seconds())
+        # Active timers
+        if ACTIVE_TIMERS:
+            timer_list = []
+            for timer in ACTIVE_TIMERS.values():
+                remaining = timer["end_time"] - now
+                remaining_secs = int(remaining.total_seconds())
 
-            if remaining_secs < 60:
-                time_left = f"{remaining_secs} seconds remaining"
-            elif remaining_secs < 3600:
-                mins = remaining_secs // 60
-                secs = remaining_secs % 60
-                if secs > 0:
-                    time_left = f"{mins} minutes and {secs} seconds remaining"
+                if remaining_secs < 60:
+                    time_left = f"{remaining_secs} seconds remaining"
+                elif remaining_secs < 3600:
+                    mins = remaining_secs // 60
+                    secs = remaining_secs % 60
+                    if secs > 0:
+                        time_left = f"{mins} minutes and {secs} seconds remaining"
+                    else:
+                        time_left = f"{mins} minute{'s' if mins != 1 else ''} remaining"
                 else:
-                    time_left = f"{mins} minute{'s' if mins != 1 else ''} remaining"
-            else:
-                hours = remaining_secs // 3600
-                mins = (remaining_secs % 3600) // 60
-                time_left = f"{hours} hour{'s' if hours != 1 else ''} and {mins} minute{'s' if mins != 1 else ''} remaining"
+                    hours = remaining_secs // 3600
+                    mins = (remaining_secs % 3600) // 60
+                    time_left = f"{hours} hour{'s' if hours != 1 else ''} and {mins} minute{'s' if mins != 1 else ''} remaining"
 
-            timer_list.append(f"{timer['name']} has {time_left}")
+                timer_list.append(f"{timer['name']} has {time_left}")
 
-        return "Active timers: " + ". ".join(timer_list) + ". Read this exactly to the user."
+            results.append("Active timers: " + ". ".join(timer_list))
+
+        # Recently expired timers
+        if EXPIRED_TIMERS:
+            expired_list = []
+            for timer in EXPIRED_TIMERS.values():
+                ago = (now - timer["expired_at"]).total_seconds()
+                if ago < 60:
+                    time_ago = f"{int(ago)} seconds ago"
+                else:
+                    mins_ago = int(ago // 60)
+                    time_ago = f"{mins_ago} minute{'s' if mins_ago != 1 else ''} ago"
+
+                expired_list.append(f"{timer['name']} went off {time_ago}")
+
+            results.append("Recently expired: " + ". ".join(expired_list))
+
+        if not results:
+            return "No active or recent timers."
+
+        return " ".join(results)
+
+
+# Load timers on module import
+_load_timers()
