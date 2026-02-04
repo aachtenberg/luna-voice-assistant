@@ -1,4 +1,34 @@
+# Environment files with secrets
 .env
+brain/.env
+voice/.env
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 venv/
+.venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temp files
+snapshot.json
+*.tmp
+
+# Piper models (download separately)
+*.onnx
+*.onnx.json
+
+# Picovoice license files
+*.ppn
