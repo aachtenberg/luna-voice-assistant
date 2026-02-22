@@ -3,9 +3,11 @@ uvicorn
 httpx
 paho-mqtt
 python-dotenv
+pyyaml
 anthropic>=0.18.0
 groq>=0.4.0
 prometheus-client
 python-kasa
 pywizlight
 tzdata
+psycopg2-binary
