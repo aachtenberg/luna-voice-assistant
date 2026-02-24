@@ -8,11 +8,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-**Two-node system:**
-- **Raspberry Pi 3**: Voice endpoint (wake word detection, audio capture, Piper TTS playback)
-- **5080 Server (WSL2)**: Compute backend (Ollama LLM, faster-whisper STT, SearXNG search)
+**k3s cluster with 5 nodes:**
+- **raspberrypi** (192.168.0.167) — control-plane, primary
+- **raspberrypi2** (192.168.0.146) — apps workloads
+- **raspberrypi3** (192.168.0.111) — control-plane, runs luna-brain pod
+- **raspberrypi4** (192.168.0.116) — control-plane
+- **headless-gpu** (192.168.0.150) — GPU node (AMD RX 7900 XT), runs Ollama/faster-whisper/SearXNG
 
-**Data flow**: Wake word → Audio capture → Whisper transcription → Brain/LLM → TTS response → Playback
+**Voice service** runs bare metal on raspberrypi3 (not containerized — requires USB audio hardware access).
+
+**Data flow**: Wake word → Audio capture → Whisper transcription (k3s) → Brain/LLM (k3s) → TTS response (local Piper) → Playback
 
 ## Project Structure
 
@@ -41,34 +46,40 @@ homelab-app/
 
 ## Services & Endpoints
 
-| Service | Host | Port | Purpose |
-|---------|------|------|---------|
-| Brain API | Pi | 8000 | FastAPI, routes to LLM |
-| Piper TTS | Pi | - | Local binary ~/piper/piper |
-| faster-whisper | WSL2 | 8090 | Speech-to-text |
-| Ollama | WSL2 | 11434 | LLM (qwen2.5:14b) |
-| SearXNG | WSL2 | 8089 | Web search |
-| InfluxDB 3 | Docker | 8181 | Sensor data (SQL API) |
-| Prometheus | Docker | 9090 | System metrics |
-| MQTT | Docker | 1883 | Home automation |
+**k3s namespaces:**
+
+| Service | Namespace | ClusterIP Port | NodePort | Purpose |
+|---------|-----------|---------------|----------|---------|
+| luna-brain | apps | 8000 | — | FastAPI, routes to LLM |
+| faster-whisper | ai | 8000 | 30800 | Speech-to-text |
+| searxng | ai | 8080 | 30089 | Web search |
+| llm-gateway | ai | 4000 | — | LLM routing |
+| mosquitto | iot | 1883 | — | MQTT broker |
+| prometheus | monitoring | 9090 | — | System metrics |
+| timescaledb | data | 5432 | — | Time-series data |
+
+**Bare metal:**
+
+| Service | Host | Purpose |
+|---------|------|---------|
+| Piper TTS | raspberrypi3 | Local binary ~/piper/piper |
+| Voice assistant | raspberrypi3 | Wake word + audio + TTS |
+| Ollama | 192.168.0.150 | LLM inference (qwen3:14b) |
+| InfluxDB 3 | 192.168.0.167:8181 | Sensor data (SQL API) |
 
 ## Commands
 
 ```bash
-# Start brain service
-cd brain && source venv/bin/activate && uvicorn main:app --host 0.0.0.0 --port 8000
-
-# Start voice assistant
+# Start voice assistant (bare metal on raspberrypi3)
 cd voice && source venv/bin/activate && python main.py
 
-# Test brain directly
-curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" -d '{"text": "What time is it?"}'
+# Brain is a k3s deployment — manage via kubectl
+kubectl get pods -n apps -l app.kubernetes.io/name=luna-brain
+kubectl logs -n apps -l app.kubernetes.io/name=luna-brain -f
 
-# Test InfluxDB query
-curl -s -X POST 'http://192.168.0.167:8181/api/v3/query_sql' \
-  -H 'Authorization: Bearer $INFLUXDB_TOKEN' \
-  -H 'Content-Type: application/json' \
-  -d '{"db": "temperature_data", "q": "SELECT * FROM esp_temperature LIMIT 5"}'
+# Test brain directly (via ClusterIP from any k3s node)
+curl -X POST http://luna-brain.apps.svc.cluster.local:8000/ask \
+  -H "Content-Type: application/json" -d '{"text": "What time is it?"}'
 ```
 
 ## InfluxDB Schema
@@ -81,47 +92,60 @@ curl -s -X POST 'http://192.168.0.167:8181/api/v3/query_sql' \
 ## Current Status
 
 ### ✅ Completed
-- Brain service with Ollama tool calling (qwen2.5:14b)
+- k3s cluster deployment (brain, faster-whisper, searxng, mosquitto, monitoring)
+- Brain service with Ollama tool calling (qwen3:14b)
 - Tools: web_search, query_influxdb, query_prometheus, mqtt_publish
-- Voice service with OpenWakeWord, Whisper, Piper
-- Audio handling: USB mic + Bluetooth speaker via PipeWire
-- Time injection in system prompt
+- Voice service with OpenWakeWord ("hey luna"), Whisper, Piper TTS
+- Audio handling: Anker S330 USB speakerphone via PipeWire
+- Barge-in support (interrupt TTS with wake word)
 - Whisper hallucination filtering
 - InfluxDB 3 SQL queries working
+- Structured JSON logging (Loki-compatible)
 
-### 🔄 In Progress / Issues
-- **Wake word self-triggering**: Still occasionally triggers on ambient noise after TTS
-- **Recording timing**: Cooldown/flush balance - too aggressive loses speech, too light causes loops
+## USB Audio Setup (Anker PowerConf S330)
 
-### 📋 Next Steps
-1. **Custom wake word**: Train "Yo Luna" model in Colab, deploy to voice/models/
-2. **Barge-in support**: Revisit when using separate USB mic + speaker (not Bluetooth earbuds)
-3. **Conversation context**: Add multi-turn memory to brain service
-4. **Systemd services**: Create service files for brain and voice
-5. **Error handling**: Better recovery from network failures
-6. **Logging**: Add structured logging for debugging
+The Anker S330 USB speakerphone is the audio device for both mic input and speaker output. On the Pi 3, USB isochronous transfers can drop under sustained load, causing the audio capture stream to stall and hang `read_chunk()` indefinitely.
+
+**Required udev rule** — must be installed on any new Pi running the voice service:
+
+```bash
+sudo tee /etc/udev/rules.d/99-usb-no-autosuspend.rules << 'EOF'
+# Disable USB autosuspend for Anker PowerConf S330 to prevent audio stream stalls
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="291a", ATTR{idProduct}=="3308", ATTR{power/autosuspend_delay_ms}="-1", ATTR{power/control}="on"
+
+# Disable autosuspend on USB root hubs (prevents cascading suspend of child devices)
+ACTION=="add", SUBSYSTEM=="usb", ATTR{bDeviceClass}=="09", ATTR{power/control}="on"
+EOF
+sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=usb
+```
+
+**Why**: USB autosuspend (default 2s timeout) causes the xHCI controller to briefly suspend the device, which corrupts the isochronous audio capture stream. Kernel logs show `retire_capture_urb: callbacks suppressed` when this happens. The voice app has a 5-second watchdog timeout on audio reads (`READ_TIMEOUT_SECONDS` in `audio.py`) that auto-recovers by reopening the stream, but disabling autosuspend prevents the issue in the first place.
+
+**Verify**:
+```bash
+# Should show autosuspend=-1, control=on
+cat /sys/bus/usb/devices/1-1/power/autosuspend_delay_ms  # -1
+cat /sys/bus/usb/devices/1-1/power/control                # on
+```
 
 ## Configuration
 
 Both services use `.env` files (not committed, see `.env.example`):
 
-**brain/.env**:
-```
-OLLAMA_URL=http://192.168.0.198:11434
-OLLAMA_MODEL=qwen2.5:14b
-INFLUXDB_URL=http://192.168.0.167:8181
-INFLUXDB_TOKEN=<token>
-INFLUXDB_DATABASE=temperature_data
-...
-```
+**brain** — configured via k3s deployment env vars (see `kubectl get deploy luna-brain -n apps -o yaml`):
+- LLM_PROVIDER, OLLAMA_URL, OLLAMA_MODEL
+- SEARXNG_URL (cluster-internal: `searxng.ai.svc.cluster.local`)
+- MQTT_BROKER (cluster-internal: `mosquitto.iot.svc.cluster.local`)
+- Secrets via k8s Secret `luna-brain-secrets`
 
-**voice/.env**:
+**voice/.env** (uses k3s ClusterIPs — voice runs bare metal on a k3s node):
 ```
-BRAIN_URL=http://localhost:8000
-WHISPER_URL=http://192.168.0.198:8090
+BRAIN_URL=http://<luna-brain-clusterip>:8000
+WHISPER_URL=http://<faster-whisper-clusterip>:8000
 PIPER_PATH=/home/aachten/piper/piper
-PIPER_MODEL=/home/aachten/piper-voices/en_US-lessac-medium.onnx
-WAKEWORD_THRESHOLD=0.8
+PIPER_MODEL=/home/aachten/piper-voices/en_US-hfc_female-medium.onnx
+WAKEWORD_ENGINE=openwakeword
+WAKEWORD_THRESHOLD=0.5
 ```
 
 ## Location Context

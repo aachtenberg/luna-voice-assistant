@@ -32,3 +32,12 @@ snapshot.json
 
 # Picovoice license files
 *.ppn
+
+# Home Assistant storage (contains auth hashes, UUIDs)
+homeassistant/.storage/
+
+# Test files with credential references
+brain/test_anthropic.py
+
+# Wake word model data (large binary)
+voice/assets/*.onnx.data
