@@ -24,6 +24,10 @@ class LLMProvider(ABC):
         """
         pass
 
+    def chat_stream(self, user_message: str, system_prompt: str, tools: list, history: list = None):
+        """Yields token strings. Default falls back to non-streaming chat()."""
+        yield self.chat(user_message, system_prompt, tools, history)
+
     def get_time_context(self) -> str:
         """Get current date/time context to append to system prompt."""
         try:

@@ -1,10 +1,15 @@
+import logging
+import threading
 import numpy as np
 import sounddevice as sd
 from scipy import signal
 from config import (
     DEVICE_SAMPLE_RATE, TARGET_SAMPLE_RATE, CHANNELS,
-    DEVICE_CHUNK_SIZE, SILENCE_THRESHOLD, SILENCE_DURATION, MIN_RECORD_SECONDS
+    CHUNK_DURATION, SILENCE_THRESHOLD, SILENCE_DURATION, MIN_RECORD_SECONDS,
+    STT_PARTIAL_DELAY, AUDIO_READ_TIMEOUT, FLUSH_SECONDS
 )
+
+log = logging.getLogger("voice")
 
 
 def resample(audio_data: np.ndarray, orig_rate: int, target_rate: int) -> np.ndarray:
@@ -29,8 +34,8 @@ class AudioRecorder:
             # Use configured sample rate - PipeWire handles conversion
             self.sample_rate = DEVICE_SAMPLE_RATE
 
-            # Calculate chunk size for this sample rate (80ms of audio)
-            chunk_size = int(self.sample_rate * 0.08)
+            # Calculate chunk size for this sample rate
+            chunk_size = int(self.sample_rate * CHUNK_DURATION)
 
             self.stream = sd.InputStream(
                 samplerate=self.sample_rate,
@@ -44,8 +49,9 @@ class AudioRecorder:
 
         # Flush buffer even if stream was already open
         if flush_buffer and self.stream:
-            chunk_size = int(self.sample_rate * 0.08)
-            for _ in range(15):  # Discard ~1.2 seconds of buffered audio
+            chunk_size = int(self.sample_rate * CHUNK_DURATION)
+            flush_chunks = int(FLUSH_SECONDS / CHUNK_DURATION)
+            for _ in range(flush_chunks):
                 try:
                     self.stream.read(chunk_size)
                 except:
@@ -60,11 +66,41 @@ class AudioRecorder:
             self.stream = None
 
     def read_chunk(self) -> bytes:
-        """Read a chunk of audio data and resample to 16kHz."""
+        """Read a chunk of audio data and resample to 16kHz.
+
+        Uses a watchdog timeout to recover from USB stream stalls
+        (common with Anker S330 on Pi 3 due to isochronous transfer issues).
+        """
         if self.stream is None:
             self.open_stream()
-        chunk_size = int(self.sample_rate * 0.08)
-        data, _ = self.stream.read(chunk_size)
+        chunk_size = int(self.sample_rate * CHUNK_DURATION)
+
+        result = [None]
+        error = [None]
+
+        def _read():
+            try:
+                data, _ = self.stream.read(chunk_size)
+                result[0] = data
+            except Exception as e:
+                error[0] = e
+
+        reader = threading.Thread(target=_read, daemon=True)
+        reader.start()
+        reader.join(timeout=AUDIO_READ_TIMEOUT)
+
+        if reader.is_alive():
+            # Stream stalled — reopen it
+            log.warning("Audio read timed out — USB stream stall detected, reopening stream",
+                        extra={"event": "audio_stall", "timeout_s": AUDIO_READ_TIMEOUT})
+            self.close_stream()
+            self.open_stream(flush_buffer=True)
+            raise IOError("Audio read timed out — stream reopened")
+
+        if error[0] is not None:
+            raise error[0]
+
+        data = result[0]
         # Flatten and convert
         audio_native = data.flatten().astype(np.int16)
         audio_16k = resample(audio_native, self.sample_rate, TARGET_SAMPLE_RATE)
@@ -75,7 +111,7 @@ class AudioRecorder:
         self.open_stream()
         frames = []
         silent_chunks = 0
-        chunk_size = int(self.sample_rate * 0.08)
+        chunk_size = int(self.sample_rate * CHUNK_DURATION)
         chunks_per_second = self.sample_rate / chunk_size
         silence_chunks_needed = int(SILENCE_DURATION * chunks_per_second)
         max_chunks = int(max_seconds * chunks_per_second)
@@ -107,6 +143,88 @@ class AudioRecorder:
         print(f"Recorded {chunk_count} chunks, max amplitude: {max_amplitude:.0f} (threshold: {SILENCE_THRESHOLD})")
         return b''.join(frames)
 
+    def record_until_silence_streaming(self, max_seconds: float = 10.0):
+        """Record audio until silence, yielding buffer snapshots for concurrent STT.
+
+        Returns a StreamingRecordSession that the caller can use to read
+        partial audio while recording is still in progress.
+        """
+        session = StreamingRecordSession()
+
+        def _record():
+            try:
+                self.open_stream()
+                chunk_size = int(self.sample_rate * CHUNK_DURATION)
+                chunks_per_second = self.sample_rate / chunk_size
+                silence_chunks_needed = int(SILENCE_DURATION * chunks_per_second)
+                max_chunks = int(max_seconds * chunks_per_second)
+                min_chunks = int(MIN_RECORD_SECONDS * chunks_per_second)
+                partial_chunks = int(STT_PARTIAL_DELAY * chunks_per_second)
+
+                silent_chunks = 0
+                chunk_count = 0
+                max_amplitude = 0
+
+                for _ in range(max_chunks):
+                    data, _ = self.stream.read(chunk_size)
+                    audio_native = data.flatten().astype(np.int16)
+                    chunk_count += 1
+
+                    amplitude = np.abs(audio_native).mean()
+                    max_amplitude = max(max_amplitude, amplitude)
+
+                    # Check for silence (only after minimum recording time)
+                    if chunk_count > min_chunks:
+                        if amplitude < SILENCE_THRESHOLD:
+                            silent_chunks += 1
+                            if silent_chunks >= silence_chunks_needed:
+                                break
+                        else:
+                            silent_chunks = 0
+
+                    # Resample and append to shared buffer
+                    audio_16k = resample(audio_native, self.sample_rate, TARGET_SAMPLE_RATE)
+                    with session.lock:
+                        session.buffer.extend(audio_16k.tobytes())
+
+                    # Signal when enough audio for a partial transcription
+                    if chunk_count == partial_chunks:
+                        session.partial_ready.set()
+
+                print(f"Recorded {chunk_count} chunks, max amplitude: {max_amplitude:.0f} (threshold: {SILENCE_THRESHOLD})")
+            finally:
+                # Signal partial ready in case we finished before the threshold
+                session.partial_ready.set()
+                session.recording_done.set()
+
+        session.thread = threading.Thread(target=_record, daemon=True)
+        session.thread.start()
+        return session
+
     def cleanup(self):
         """Clean up audio resources."""
         self.close_stream()
+
+
+class StreamingRecordSession:
+    """Holds shared state for concurrent record + transcribe."""
+
+    def __init__(self):
+        self.buffer = bytearray()
+        self.lock = threading.Lock()
+        self.partial_ready = threading.Event()
+        self.recording_done = threading.Event()
+        self.thread = None
+
+    def get_audio_snapshot(self) -> bytes:
+        """Get a copy of all audio recorded so far."""
+        with self.lock:
+            return bytes(self.buffer)
+
+    def wait_for_partial(self, timeout: float = 5.0) -> bool:
+        """Wait until enough audio is available for a partial transcription."""
+        return self.partial_ready.wait(timeout=timeout)
+
+    def wait_for_done(self, timeout: float = 15.0) -> bool:
+        """Wait until recording is complete."""
+        return self.recording_done.wait(timeout=timeout)

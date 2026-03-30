@@ -1,7 +1,10 @@
 import httpx
 import io
 import wave
+import logging
 from config import WHISPER_URL, TARGET_SAMPLE_RATE, CHANNELS
+
+log = logging.getLogger("voice")
 
 # Known Whisper hallucinations that occur with silence/noise/unclear audio
 # These are common phrases Whisper outputs when it has nothing real to transcribe
@@ -58,9 +61,8 @@ def transcribe(audio_data: bytes) -> str:
 
     try:
         response = httpx.post(
-            f"{WHISPER_URL}/v1/audio/transcriptions",
+            f"{WHISPER_URL}/transcribe",
             files={"file": ("audio.wav", wav_buffer, "audio/wav")},
-            data={"model": "medium", "language": "en"},  # Force English
             timeout=30.0
         )
         response.raise_for_status()
@@ -76,3 +78,50 @@ def transcribe(audio_data: bytes) -> str:
     except Exception as e:
         print(f"Transcription error: {e}")
         return ""
+
+
+def _audio_to_wav(audio_data: bytes) -> io.BytesIO:
+    """Convert raw PCM audio to WAV format."""
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, 'wb') as wav_file:
+        wav_file.setnchannels(CHANNELS)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(TARGET_SAMPLE_RATE)
+        wav_file.writeframes(audio_data)
+    wav_buffer.seek(0)
+    return wav_buffer
+
+
+def transcribe_streaming(session) -> str:
+    """Transcribe concurrently with recording using a StreamingRecordSession.
+
+    Sends a partial request to warm up the server while recording continues,
+    then sends the final complete audio once recording is done.
+    """
+    # Wait for enough audio to send a partial (warm-up) request
+    session.wait_for_partial(timeout=5.0)
+
+    if not session.recording_done.is_set():
+        # Recording still in progress — send partial audio to warm up the server
+        partial_audio = session.get_audio_snapshot()
+        if len(partial_audio) > 1600:
+            try:
+                wav_buf = _audio_to_wav(partial_audio)
+                httpx.post(
+                    f"{WHISPER_URL}/transcribe",
+                    files={"file": ("audio.wav", wav_buf, "audio/wav")},
+                    timeout=10.0
+                )
+                log.debug("Partial STT warm-up sent", extra={"event": "stt_warmup"})
+            except Exception:
+                pass  # Warm-up is best-effort
+
+    # Wait for recording to finish
+    session.wait_for_done(timeout=15.0)
+
+    # Send the complete audio for final transcription
+    final_audio = session.get_audio_snapshot()
+    if len(final_audio) < 1600:
+        return ""
+
+    return transcribe(final_audio)

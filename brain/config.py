@@ -31,6 +31,10 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 # Ollama settings
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://192.168.0.198:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
+OLLAMA_AUTO_MODEL = os.getenv("OLLAMA_AUTO_MODEL", "true").lower() in ("1", "true", "yes", "on")
+OLLAMA_MODEL_REFRESH_SECONDS = int(
+    os.getenv("OLLAMA_MODEL_REFRESH_SECONDS", str(_cfg("ollama", "model_refresh_seconds", default=5)))
+)
 
 # Anthropic (Claude) settings
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")

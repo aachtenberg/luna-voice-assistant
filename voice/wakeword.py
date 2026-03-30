@@ -3,11 +3,9 @@ import numpy as np
 from config import (
     WAKEWORD_ENGINE,
     PICOVOICE_ACCESS_KEY, PORCUPINE_MODEL, PORCUPINE_SENSITIVITY,
-    CUSTOM_WAKEWORD_MODEL, WAKEWORD_THRESHOLD
+    CUSTOM_WAKEWORD_MODEL, WAKEWORD_THRESHOLD,
+    MIN_DETECTION_AMPLITUDE, VAD_THRESHOLD
 )
-
-# Minimum amplitude to even consider wake word detection
-MIN_DETECTION_AMPLITUDE = 30
 
 
 class WakeWordDetector:
@@ -47,8 +45,6 @@ class WakeWordDetector:
         """Initialize OpenWakeWord."""
         from openwakeword.model import Model
 
-        VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.5"))
-
         if CUSTOM_WAKEWORD_MODEL and os.path.exists(CUSTOM_WAKEWORD_MODEL):
             print(f"Loading custom OpenWakeWord model: {CUSTOM_WAKEWORD_MODEL}")
             self._oww_model = Model(
@@ -71,18 +67,14 @@ class WakeWordDetector:
         # Convert bytes to numpy array
         audio_data = np.frombuffer(audio_chunk, dtype=np.int16)
 
-        # Check audio amplitude - require meaningful audio level
+        # Check audio amplitude
         amplitude = np.abs(audio_data).mean()
-        if amplitude < MIN_DETECTION_AMPLITUDE:
-            # Too quiet - skip detection
-            if self.engine == "porcupine":
-                # Still need to feed data to maintain buffer state
-                self._buffer = np.concatenate([self._buffer, audio_data])
-                # Discard excess buffer to prevent memory growth
-                if len(self._buffer) > self._frame_length * 10:
-                    self._buffer = self._buffer[-self._frame_length * 5:]
-            elif self._oww_model:
-                self._oww_model.predict(audio_data)
+
+        # For Porcupine: gate on amplitude (no built-in VAD) and maintain buffer state
+        if self.engine == "porcupine" and amplitude < MIN_DETECTION_AMPLITUDE:
+            self._buffer = np.concatenate([self._buffer, audio_data])
+            if len(self._buffer) > self._frame_length * 10:
+                self._buffer = self._buffer[-self._frame_length * 5:]
             return False
 
         if self.engine == "porcupine":

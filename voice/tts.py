@@ -1,8 +1,10 @@
 import subprocess
 import tempfile
 import os
+import re
 import time
 import threading
+import queue
 from config import PIPER_PATH, PIPER_MODEL
 
 # Global state for barge-in
@@ -22,7 +24,7 @@ def _mute_mic(mute: bool):
     try:
         action = "1" if mute else "0"
         subprocess.run(
-            ["pactl", "set-source-mute", "@DEFAULT_SOURCE@", action],
+            ["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", action],
             capture_output=True,
             timeout=2
         )
@@ -76,9 +78,128 @@ def speak(text: str):
             os.unlink(tmp_path)
 
 
+# Sentence boundary pattern: period/exclamation/question followed by space, or newline
+_SENTENCE_END = re.compile(r'[.!?](?:\s+|$)|[\n]')
+
+
+def _clean_for_tts(text: str) -> str:
+    """Remove markdown formatting that TTS would read literally."""
+    text = re.sub(r'\*+', '', text)
+    text = re.sub(r'_+', '', text)
+    text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    text = re.sub(r'`+', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+# Module-level stop event for streamed TTS barge-in
+_stream_stop = threading.Event()
+
+
+def speak_streamed(token_iter, on_first_audio=None, mute_mic=True):
+    """Stream TTS: buffer tokens into sentences, synthesize and play incrementally.
+
+    Args:
+        token_iter: Iterator yielding text tokens from the LLM
+        on_first_audio: Optional callback when first audio starts playing
+        mute_mic: Whether to mute mic during playback (disable for barge-in)
+
+    Returns:
+        The full accumulated response text.
+    """
+    global _playback_process
+    _stream_stop.clear()
+
+    sentence_queue = queue.Queue()
+    full_text_parts = []
+
+    def producer():
+        sentence_buffer = ""
+        for token in token_iter:
+            if _stream_stop.is_set():
+                break
+            full_text_parts.append(token)
+            sentence_buffer += token
+            # Split on sentence boundaries
+            while True:
+                match = _SENTENCE_END.search(sentence_buffer)
+                if not match:
+                    break
+                sentence = sentence_buffer[:match.end()].strip()
+                sentence_buffer = sentence_buffer[match.end():]
+                if sentence:
+                    sentence_queue.put(sentence)
+        # Flush remaining text
+        remaining = sentence_buffer.strip()
+        if remaining:
+            sentence_queue.put(remaining)
+        sentence_queue.put(None)  # Sentinel
+
+    producer_thread = threading.Thread(target=producer, daemon=True)
+    producer_thread.start()
+
+    first_audio_fired = False
+    if mute_mic:
+        _mute_mic(True)
+    try:
+        while True:
+            try:
+                sentence = sentence_queue.get(timeout=30)
+            except queue.Empty:
+                break
+            if sentence is None or _stream_stop.is_set():
+                break
+
+            cleaned = _clean_for_tts(sentence)
+            if not cleaned:
+                continue
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_path = tmp.name
+
+            try:
+                proc = subprocess.run(
+                    [PIPER_PATH, "--model", PIPER_MODEL, "--output_file", tmp_path],
+                    input=cleaned.encode(),
+                    capture_output=True,
+                    timeout=30
+                )
+                if proc.returncode != 0:
+                    continue
+
+                if not first_audio_fired:
+                    if on_first_audio:
+                        on_first_audio()
+                    first_audio_fired = True
+
+                with _playback_lock:
+                    _playback_process = subprocess.Popen(["pw-play", tmp_path])
+                _playback_process.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                stop_speaking()
+            except Exception as e:
+                print(f"Streamed TTS error: {e}")
+            finally:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+
+            if _stream_stop.is_set():
+                break
+    finally:
+        if mute_mic:
+            _mute_mic(False)
+        with _playback_lock:
+            _playback_process = None
+        producer_thread.join(timeout=2)
+
+    return "".join(full_text_parts)
+
+
 def stop_speaking():
     """Stop any ongoing TTS playback (for barge-in)."""
     global _playback_process
+    _stream_stop.set()  # Also stop streamed TTS pipeline
 
     with _playback_lock:
         if _playback_process is not None:

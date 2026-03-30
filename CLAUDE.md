@@ -82,6 +82,29 @@ curl -X POST http://luna-brain.apps.svc.cluster.local:8000/ask \
   -H "Content-Type: application/json" -d '{"text": "What time is it?"}'
 ```
 
+## Building and Deploying (brain)
+
+`docker` is not available on the cluster nodes (permission denied). Use `nerdctl` instead.
+
+**Critical**: nerdctl's default namespace is invisible to k3s. You must build into the `k8s.io` namespace and then import the image into k3s's containerd store.
+
+```bash
+# 1. Build the image into the k8s.io namespace (NOT default nerdctl namespace)
+sudo nerdctl --namespace k8s.io build --no-cache -t homelab-app-brain:latest ./brain/
+
+# 2. Import into k3s containerd image store
+sudo nerdctl --namespace k8s.io save homelab-app-brain:latest | sudo k3s ctr images import -
+
+# 3. Restart the deployment to pick up the new image
+kubectl rollout restart deploy/luna-brain -n apps
+kubectl rollout status deploy/luna-brain -n apps --timeout=60s
+```
+
+**Notes**:
+- `--no-cache` is required to avoid stale cached layers.
+- The `nerdctl save | k3s ctr import` pipe is needed because nerdctl's k8s.io namespace and k3s's internal containerd store are separate registries.
+- Image pull policy in the deployment must be `Never` (or `IfNotPresent`) so k3s uses the locally imported image.
+
 ## InfluxDB Schema
 
 **Database**: `temperature_data`
@@ -93,8 +116,9 @@ curl -X POST http://luna-brain.apps.svc.cluster.local:8000/ask \
 
 ### ✅ Completed
 - k3s cluster deployment (brain, faster-whisper, searxng, mosquitto, monitoring)
-- Brain service with Ollama tool calling (qwen3:14b)
+- Brain service with Ollama tool calling (qwen2.5:14b via OLLAMA_AUTO_MODEL)
 - Tools: web_search, query_influxdb, query_prometheus, mqtt_publish
+- LLM fallback chain: Ollama → Groq → Anthropic (FallbackProvider)
 - Voice service with OpenWakeWord ("hey luna"), Whisper, Piper TTS
 - Audio handling: Anker S330 USB speakerphone via PipeWire
 - Barge-in support (interrupt TTS with wake word)

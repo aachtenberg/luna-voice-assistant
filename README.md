@@ -67,7 +67,7 @@ Self-hosted voice assistant replacing Alexa with local/cloud LLMs, smart home co
 | LLM (cloud) | Claude 3.5 Haiku | Anthropic API |
 | LLM (local) | Qwen 2.5 14B | Ollama on server |
 | STT | faster-whisper large-v3 | Server (CUDA) |
-| TTS | Piper en_US-lessac-medium | Pi (local) |
+| TTS | Piper en_US-hfc_female-medium | Pi (local) |
 | Wake word | OpenWakeWord (custom) | Pi (local) |
 
 ### Supporting Services
@@ -107,10 +107,10 @@ tar -xzf piper_arm64.tar.gz -C ~/piper
 
 # Piper voice model
 mkdir -p ~/piper-voices
-wget -O ~/piper-voices/en_US-lessac-medium.onnx \
-  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
-wget -O ~/piper-voices/en_US-lessac-medium.onnx.json \
-  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
+wget -O ~/piper-voices/en_US-hfc_female-medium.onnx \
+  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx
+wget -O ~/piper-voices/en_US-hfc_female-medium.onnx.json \
+  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx.json
 ```
 
 **On the server (if using local LLM/Whisper):**
@@ -157,8 +157,8 @@ pip install -r requirements.txt
 
 **brain/.env:**
 ```bash
-# LLM Provider: ollama, anthropic, or groq
-LLM_PROVIDER=anthropic
+# LLM Provider: single (ollama, anthropic, groq) or fallback chain (comma-separated)
+LLM_PROVIDER=ollama,groq,anthropic
 
 # Anthropic (if using Claude)
 ANTHROPIC_API_KEY=sk-ant-xxx
@@ -166,7 +166,12 @@ ANTHROPIC_MODEL=claude-3-5-haiku-latest
 
 # Ollama (if using local)
 OLLAMA_URL=http://your-server:11434
+# Auto-select currently loaded model on Ollama server
+OLLAMA_AUTO_MODEL=true
+# Fallback if no model is currently loaded
 OLLAMA_MODEL=llama3.1:8b
+# Refresh interval for active-model detection
+OLLAMA_MODEL_REFRESH_SECONDS=5
 
 # Groq (if using Groq)
 GROQ_API_KEY=gsk_xxx
@@ -187,8 +192,10 @@ SEARXNG_URL=http://192.168.x.x:8089
 BRAIN_URL=http://localhost:8000
 WHISPER_URL=http://your-server:8090
 PIPER_PATH=/home/youruser/piper/piper
-PIPER_MODEL=/home/youruser/piper-voices/en_US-lessac-medium.onnx
-WAKEWORD_THRESHOLD=0.7
+PIPER_MODEL=/home/youruser/piper-voices/en_US-hfc_female-medium.onnx
+WAKEWORD_THRESHOLD=0.3
+# VAD threshold for OpenWakeWord (0.0 = disabled, recommended for home use)
+VAD_THRESHOLD=0.0
 
 # MQTT for timer notifications
 MQTT_BROKER=192.168.x.x
@@ -228,6 +235,28 @@ cd voice && source venv/bin/activate
 python main.py
 ```
 
+**Option C: k3s (recommended for homelab cluster)**
+
+`brain/` is deployed to k3s, while `voice/` runs bare metal on Raspberry Pi.
+Kubernetes manifests/source of truth: https://github.com/aachtenberg/homelab-infra
+
+Quick deploy flow:
+```bash
+# docker is not available on cluster nodes — use nerdctl with k8s.io namespace
+sudo nerdctl --namespace k8s.io build --no-cache -t homelab-app-brain:latest ./brain/
+
+# Import into k3s containerd store (nerdctl and k3s use separate stores)
+sudo nerdctl --namespace k8s.io save homelab-app-brain:latest | sudo k3s ctr images import -
+
+# Restart deployment
+kubectl rollout restart deploy/luna-brain -n apps
+kubectl rollout status deploy/luna-brain -n apps --timeout=60s
+```
+
+Preferred: keep deployment state in `homelab-infra` manifests; use manual patching only for hotfixes.
+
+Full guide: `docs/k3s-deploy.md`
+
 ## Usage
 
 Say "Hey Luna" followed by your command:
@@ -258,8 +287,7 @@ pactl set-default-source <device-name>
 ```
 
 **Wake word triggers on TTS playback:**
-- The code has cooldown logic but may need tuning
-- Adjust `COOLDOWN_CHUNKS` in `voice/main.py`
+- The code has barge-in detection with cooldown logic; tune via `COOLDOWN_SECONDS` and `WAKEWORD_THRESHOLD` env vars
 - Using a speakerphone with AEC (acoustic echo cancellation) helps
 
 ### Smart Home
@@ -335,7 +363,8 @@ To add Tuya devices, you need to extract local keys via Tuya IoT platform - not 
 │   ├── llm/                 # LLM provider implementations
 │   │   ├── anthropic.py     # Claude
 │   │   ├── ollama.py        # Local Ollama
-│   │   └── groq.py          # Groq cloud
+│   │   ├── groq.py          # Groq cloud
+│   │   └── fallback.py      # FallbackProvider chain
 │   ├── tools/               # Tool implementations
 │   │   ├── kasa.py          # Smart lights (Kasa + WiZ)
 │   │   ├── timers.py        # Timer functionality
@@ -349,6 +378,8 @@ To add Tuya devices, you need to extract local keys via Tuya IoT platform - not 
 │   ├── stt.py               # Whisper client
 │   ├── tts.py               # Piper TTS
 │   └── assets/              # Wake word models
+├── docs/
+│   └── k3s-deploy.md        # Build/deploy runbook for k3s
 └── docker-compose.yml
 ```
 
