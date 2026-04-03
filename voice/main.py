@@ -103,8 +103,10 @@ def _speak_with_barge_in(recorder, detector, token_iter, on_first_audio=None):
     response = speak_streamed(token_iter, on_first_audio=on_first_audio, mute_mic=False)
 
     stop_monitor.set()
-    recorder.close_stream()  # Interrupts any pending read in monitor
-    monitor_thread.join(timeout=2.0)
+    recorder.close_stream()  # Waits for reader thread, then closes stream
+    monitor_thread.join(timeout=5.0)
+    if monitor_thread.is_alive():
+        log.warning("Barge-in monitor thread did not exit cleanly", extra={"event": "barge_in_hangup"})
 
     return response, barged_in.is_set()
 

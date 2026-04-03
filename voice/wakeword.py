@@ -111,14 +111,14 @@ class WakeWordDetector:
         return False
 
     def reset(self):
-        """Reset the model state."""
+        """Reset the model state (clears prediction buffers, keeps model loaded)."""
         print("Resetting wake word detector...")
         if self.engine == "porcupine":
             # Clear the buffer
             self._buffer = np.array([], dtype=np.int16)
         else:
-            # Recreate the OpenWakeWord model
-            self._init_openwakeword()
+            # Clear prediction history — no need to destroy/recreate the ONNX model
+            self._oww_model.reset()
 
     def cleanup(self):
         """Clean up resources."""

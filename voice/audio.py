@@ -26,6 +26,7 @@ class AudioRecorder:
         self.sample_rate = DEVICE_SAMPLE_RATE
         # Use None = system default (PipeWire will route to the right device)
         self.device_index = None
+        self._reader_thread = None  # Track the last read_chunk daemon thread
         print("Using system default audio input (PipeWire managed)")
 
     def open_stream(self, flush_buffer=False):
@@ -59,7 +60,15 @@ class AudioRecorder:
             print("Flushed audio buffer")
 
     def close_stream(self):
-        """Close the microphone stream."""
+        """Close the microphone stream.
+
+        Waits for any in-flight read_chunk daemon thread to finish before
+        closing, so we don't pull the stream out from under sounddevice's
+        C code (which causes heap corruption / malloc crashes).
+        """
+        if self._reader_thread is not None and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=AUDIO_READ_TIMEOUT + 1)
+            self._reader_thread = None
         if self.stream:
             self.stream.stop()
             self.stream.close()
@@ -86,16 +95,24 @@ class AudioRecorder:
                 error[0] = e
 
         reader = threading.Thread(target=_read, daemon=True)
+        self._reader_thread = reader
         reader.start()
         reader.join(timeout=AUDIO_READ_TIMEOUT)
 
         if reader.is_alive():
-            # Stream stalled — reopen it
+            # Stream stalled — force-close the stream to unblock the reader,
+            # then wait for the thread to actually exit before reopening.
             log.warning("Audio read timed out — USB stream stall detected, reopening stream",
                         extra={"event": "audio_stall", "timeout_s": AUDIO_READ_TIMEOUT})
-            self.close_stream()
+            if self.stream:
+                self.stream.stop()
+                self.stream.close()
+                self.stream = None
+            reader.join(timeout=2)
+            self._reader_thread = None
             self.open_stream(flush_buffer=True)
             raise IOError("Audio read timed out — stream reopened")
+        self._reader_thread = None
 
         if error[0] is not None:
             raise error[0]
