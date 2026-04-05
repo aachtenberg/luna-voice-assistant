@@ -6,6 +6,11 @@ from config import WHISPER_URL, TARGET_SAMPLE_RATE, CHANNELS
 
 log = logging.getLogger("voice")
 
+TRANSCRIPTION_ENDPOINTS = [
+    "/v1/audio/transcriptions",
+    "/transcribe",
+]
+
 # Known Whisper hallucinations that occur with silence/noise/unclear audio
 # These are common phrases Whisper outputs when it has nothing real to transcribe
 HALLUCINATION_PHRASES = [
@@ -47,6 +52,54 @@ def is_hallucination(text: str) -> bool:
     return False
 
 
+def _parse_transcription_response(response: httpx.Response) -> str:
+    """Normalize supported transcription response formats to plain text."""
+    content_type = response.headers.get("content-type", "")
+
+    if "application/json" in content_type:
+        result = response.json()
+        if isinstance(result, str):
+            return result.strip()
+        if isinstance(result, dict):
+            return result.get("text", "").strip()
+        return ""
+
+    return response.text.strip()
+
+
+def _post_transcription_request(wav_buffer: io.BytesIO, timeout: float) -> str:
+    """Post audio to the configured STT service, preferring the current API shape."""
+    last_error = None
+
+    for endpoint in TRANSCRIPTION_ENDPOINTS:
+        wav_buffer.seek(0)
+        try:
+            response = httpx.post(
+                f"{WHISPER_URL}{endpoint}",
+                files={"file": ("audio.wav", wav_buffer, "audio/wav")},
+                data={"response_format": "json"},
+                timeout=timeout,
+            )
+            if response.status_code == 404 and endpoint != TRANSCRIPTION_ENDPOINTS[-1]:
+                continue
+
+            response.raise_for_status()
+            return _parse_transcription_response(response)
+        except httpx.HTTPStatusError as exc:
+            last_error = exc
+            if exc.response.status_code == 404 and endpoint != TRANSCRIPTION_ENDPOINTS[-1]:
+                continue
+            raise
+        except Exception as exc:
+            last_error = exc
+            raise
+
+    if last_error is not None:
+        raise last_error
+
+    return ""
+
+
 def transcribe(audio_data: bytes) -> str:
     """Send audio to Whisper and get transcription."""
     # Convert raw audio to WAV format
@@ -60,14 +113,7 @@ def transcribe(audio_data: bytes) -> str:
     wav_buffer.seek(0)
 
     try:
-        response = httpx.post(
-            f"{WHISPER_URL}/transcribe",
-            files={"file": ("audio.wav", wav_buffer, "audio/wav")},
-            timeout=30.0
-        )
-        response.raise_for_status()
-        result = response.json()
-        text = result.get("text", "").strip()
+        text = _post_transcription_request(wav_buffer, timeout=30.0)
 
         # Filter out known hallucinations
         if is_hallucination(text):
@@ -107,11 +153,7 @@ def transcribe_streaming(session) -> str:
         if len(partial_audio) > 1600:
             try:
                 wav_buf = _audio_to_wav(partial_audio)
-                httpx.post(
-                    f"{WHISPER_URL}/transcribe",
-                    files={"file": ("audio.wav", wav_buf, "audio/wav")},
-                    timeout=10.0
-                )
+                _post_transcription_request(wav_buf, timeout=10.0)
                 log.debug("Partial STT warm-up sent", extra={"event": "stt_warmup"})
             except Exception:
                 pass  # Warm-up is best-effort

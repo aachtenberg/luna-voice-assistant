@@ -190,7 +190,7 @@ SEARXNG_URL=http://192.168.x.x:8089
 **voice/.env:**
 ```bash
 BRAIN_URL=http://localhost:8000
-WHISPER_URL=http://your-server:8090
+WHISPER_URL=http://your-server:8000
 PIPER_PATH=/home/youruser/piper/piper
 PIPER_MODEL=/home/youruser/piper-voices/en_US-hfc_female-medium.onnx
 WAKEWORD_THRESHOLD=0.3
