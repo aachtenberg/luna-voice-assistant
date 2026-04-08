@@ -383,6 +383,32 @@ To add Tuya devices, you need to extract local keys via Tuya IoT platform - not 
 └── docker-compose.yml
 ```
 
-## License
+### Running as a Systemd Service (Bare Metal)
+
+To run the voice service resiliently on bare metal (e.g., Raspberry Pi), use the provided systemd service file.
+
+1. Copy the service file:
+   ```
+   sudo cp voice/luna-voice.service /etc/systemd/system/
+   ```
+
+2. Reload systemd:
+   ```
+   sudo systemctl daemon-reload
+   ```
+
+3. Enable and start the service:
+   ```
+   sudo systemctl enable --now luna-voice.service
+   ```
+
+4. Check status:
+   ```
+   sudo systemctl status luna-voice.service
+   ```
+
+The service will automatically restart on failures. Environment variables are loaded from the working directory's `.env` file if present, or set them in the service file under `[Service]`.
+
+# License
 
 MIT
