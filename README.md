@@ -407,7 +407,12 @@ To run the voice service resiliently on bare metal (e.g., Raspberry Pi), use the
    sudo systemctl status luna-voice.service
    ```
 
-The service will automatically restart on failures. Environment variables are loaded from the working directory's `.env` file if present, or set them in the service file under `[Service]`.
+The service will automatically restart on failures, wait for the network to be online, and load environment variables from `voice/.env` via `EnvironmentFile=` when that file exists.
+
+To follow logs:
+```
+sudo journalctl -u luna-voice.service -f
+```
 
 # License
 

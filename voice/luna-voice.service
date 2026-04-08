@@ -1,15 +1,16 @@
 [Unit]
 Description=Luna Voice Assistant
-After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 User=aachten
 WorkingDirectory=/home/aachten/luna-voice-assistant/voice
-ExecStart=/home/aachten/luna-voice-assistant/voice/venv/bin/python main.py
+EnvironmentFile=-/home/aachten/luna-voice-assistant/voice/.env
+ExecStart=/home/aachten/luna-voice-assistant/voice/venv/bin/python /home/aachten/luna-voice-assistant/voice/main.py
 Restart=always
 RestartSec=5s
 Environment=PATH=/home/aachten/luna-voice-assistant/voice/venv/bin:/usr/local/bin:/usr/bin:/bin
-# Add other environment variables from .env if needed
 
 [Install]
 WantedBy=multi-user.target
