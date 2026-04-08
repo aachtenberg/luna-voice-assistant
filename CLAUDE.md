@@ -22,24 +22,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Structure
 
 ```
-homelab-app/
-├── brain/                    # FastAPI service (runs on Pi, calls remote services)
-│   ├── main.py              # /ask endpoint
-│   ├── ollama_client.py     # LLM + tool calling loop
+luna-voice-assistant/
+├── brain/                    # FastAPI service (runs in k3s, calls remote services)
+│   ├── main.py              # /ask and /ask/stream endpoints
 │   ├── prompts.py           # System prompt + tool definitions
 │   ├── config.py            # Environment-based configuration
+│   ├── llm/                 # Provider implementations + fallback chain
 │   └── tools/               # Tool implementations
 │       ├── web_search.py    # SearXNG
-│       ├── influxdb.py      # InfluxDB 3 SQL queries
 │       ├── prometheus.py    # PromQL queries
-│       └── mqtt.py          # MQTT publish
+│       ├── timescaledb.py   # Sensor data SQL queries
+│       ├── mqtt.py          # MQTT publish
+│       ├── timers.py        # Persistent timers
+│       ├── kasa.py          # Kasa + WiZ light control
+│       └── weather.py       # Open-Meteo weather queries
 ├── voice/                    # Voice assistant (runs on Pi)
 │   ├── main.py              # Main loop
 │   ├── audio.py             # Mic recording with sounddevice
 │   ├── wakeword.py          # OpenWakeWord detection
 │   ├── stt.py               # Whisper transcription
 │   ├── tts.py               # Piper TTS + pw-play
-│   └── brain_client.py      # HTTP client to brain service
+│   ├── brain_client.py      # HTTP client to brain service
+│   ├── metrics_server.py    # Prometheus /metrics endpoint
+│   └── luna-voice.service   # Systemd unit for bare-metal runtime
 └── docs/
     └── broker-topics-known.txt
 ```
@@ -64,8 +69,8 @@ homelab-app/
 |---------|------|---------|
 | Piper TTS | raspberrypi3 | Local binary ~/piper/piper |
 | Voice assistant | raspberrypi3 | Wake word + audio + TTS |
-| Ollama | 192.168.0.150 | LLM inference (qwen3:14b) |
-| InfluxDB 3 | 192.168.0.167:8181 | Sensor data (SQL API) |
+| Ollama | 192.168.0.150 | LLM inference (qwen2.5:14b) |
+| TimescaleDB | 192.168.0.146:5433 | Sensor data |
 
 ## Commands
 
@@ -105,9 +110,9 @@ kubectl rollout status deploy/luna-brain -n apps --timeout=60s
 - The `nerdctl save | k3s ctr import` pipe is needed because nerdctl's k8s.io namespace and k3s's internal containerd store are separate registries.
 - Image pull policy in the deployment must be `Never` (or `IfNotPresent`) so k3s uses the locally imported image.
 
-## InfluxDB Schema
+## Sensor Data Schema
 
-**Database**: `temperature_data`
+**Database**: `sensors`
 **Table**: `esp_temperature`
 **Columns**: device, celsius, fahrenheit, humidity (optional), time
 **Devices**: Spa, Main-Cottage, Big-Garage, Small-Garage, Pump-House, Sauna, Shack-ICF, Weather-Station-Main
@@ -117,13 +122,14 @@ kubectl rollout status deploy/luna-brain -n apps --timeout=60s
 ### ✅ Completed
 - k3s cluster deployment (brain, faster-whisper, searxng, mosquitto, monitoring)
 - Brain service with Ollama tool calling (qwen2.5:14b via OLLAMA_AUTO_MODEL)
-- Tools: web_search, query_influxdb, query_prometheus, mqtt_publish
+- Tools: web_search, query_timescaledb, query_prometheus, mqtt_publish, timers, weather, light control
 - LLM fallback chain: Ollama → Groq → Anthropic (FallbackProvider)
 - Voice service with OpenWakeWord ("hey luna"), Whisper, Piper TTS
 - Audio handling: Anker S330 USB speakerphone via PipeWire
 - Barge-in support (interrupt TTS with wake word)
 - Whisper hallucination filtering
-- InfluxDB 3 SQL queries working
+- TimescaleDB sensor queries working
+- Systemd service for resilient bare-metal voice runtime
 - Structured JSON logging (Loki-compatible)
 
 ## USB Audio Setup (Anker PowerConf S330)
@@ -158,8 +164,10 @@ Both services use `.env` files (not committed, see `.env.example`):
 
 **brain** — configured via k3s deployment env vars (see `kubectl get deploy luna-brain -n apps -o yaml`):
 - LLM_PROVIDER, OLLAMA_URL, OLLAMA_MODEL
+- TIMESCALEDB_HOST, TIMESCALEDB_PORT, TIMESCALEDB_DATABASE, TIMESCALEDB_USER, TIMESCALEDB_PASSWORD
 - SEARXNG_URL (cluster-internal: `searxng.ai.svc.cluster.local`)
 - MQTT_BROKER (cluster-internal: `mosquitto.iot.svc.cluster.local`)
+- LOCATION_CITY, LOCATION_REGION, LOCATION_COUNTRY, LOCATION_TIMEZONE, LOCATION_LAT, LOCATION_LON
 - Secrets via k8s Secret `luna-brain-secrets`
 
 **voice/.env** (uses k3s ClusterIPs — voice runs bare metal on a k3s node):
@@ -170,6 +178,9 @@ PIPER_PATH=/home/aachten/piper/piper
 PIPER_MODEL=/home/aachten/piper-voices/en_US-hfc_female-medium.onnx
 WAKEWORD_ENGINE=openwakeword
 WAKEWORD_THRESHOLD=0.5
+VAD_THRESHOLD=0.0
+STREAMING_STT_ENABLED=true
+BARGE_IN_ENABLED=true
 ```
 
 ## Location Context
