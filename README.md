@@ -407,7 +407,7 @@ To run the voice service resiliently on bare metal (e.g., Raspberry Pi), use the
    sudo systemctl status luna-voice.service
    ```
 
-The service will automatically restart on failures, wait for the network to be online, and load environment variables from `voice/.env` via `EnvironmentFile=` when that file exists.
+The service will automatically restart on failures, wait for the network to be online, load environment variables from `voice/.env` via `EnvironmentFile=` when that file exists, and export the user PipeWire runtime variables needed by `pw-play` and `wpctl`.
 
 To follow logs:
 ```

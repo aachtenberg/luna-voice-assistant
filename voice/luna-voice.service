@@ -7,6 +7,9 @@ After=network-online.target
 User=aachten
 WorkingDirectory=/home/aachten/luna-voice-assistant/voice
 EnvironmentFile=-/home/aachten/luna-voice-assistant/voice/.env
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
 ExecStart=/home/aachten/luna-voice-assistant/voice/venv/bin/python /home/aachten/luna-voice-assistant/voice/main.py
 Restart=always
 RestartSec=5s
