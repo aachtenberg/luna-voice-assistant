@@ -25,7 +25,8 @@ from metrics import (
     WAKEWORD_DETECTIONS, WAKEWORD_FALSE_TRIGGERS,
     RECORDING_DURATION, STT_REQUESTS, STT_DURATION,
     TTS_REQUESTS, BRAIN_REQUESTS, BRAIN_DURATION,
-    CONVERSATIONS_TOTAL, CONVERSATION_DURATION, LISTENING_STATE
+    CONVERSATIONS_TOTAL, CONVERSATION_DURATION, LISTENING_STATE,
+    STREAM_DEAD_RECOVERIES
 )
 
 # Setup structured logging (JSON for Loki, plain text if LOG_FORMAT=text)
@@ -164,6 +165,16 @@ def main():
 
                 if not running:
                     break
+
+                # Detect 'alive but deaf' condition: stream returns data but
+                # amplitude has been near-zero for too long (PipeWire routing
+                # stale / PortAudio lost the input device).
+                if not recorder.check_stream_health():
+                    STREAM_DEAD_RECOVERIES.inc()
+                    recorder.force_reopen()
+                    detector.reset()
+                    cooldown_remaining = COOLDOWN_CHUNKS
+                    continue
 
                 # Check for timer announcements
                 with timer_lock:

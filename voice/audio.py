@@ -1,4 +1,5 @@
 import logging
+import time
 import threading
 import numpy as np
 import sounddevice as sd
@@ -6,7 +7,8 @@ from scipy import signal
 from config import (
     DEVICE_SAMPLE_RATE, TARGET_SAMPLE_RATE, CHANNELS,
     CHUNK_DURATION, SILENCE_THRESHOLD, SILENCE_DURATION, MIN_RECORD_SECONDS,
-    STT_PARTIAL_DELAY, AUDIO_READ_TIMEOUT, FLUSH_SECONDS
+    STT_PARTIAL_DELAY, AUDIO_READ_TIMEOUT, FLUSH_SECONDS,
+    STREAM_SILENCE_TIMEOUT, STREAM_DEAD_AMPLITUDE
 )
 
 log = logging.getLogger("voice")
@@ -27,6 +29,7 @@ class AudioRecorder:
         # Use None = system default (PipeWire will route to the right device)
         self.device_index = None
         self._reader_thread = None  # Track the last read_chunk daemon thread
+        self._last_nonsilent_time = time.monotonic()
         print("Using system default audio input (PipeWire managed)")
 
     def open_stream(self, flush_buffer=False):
@@ -46,6 +49,7 @@ class AudioRecorder:
                 blocksize=chunk_size
             )
             self.stream.start()
+            self._last_nonsilent_time = time.monotonic()
             print(f"Audio stream opened at {self.sample_rate}Hz")
 
         # Flush buffer even if stream was already open
@@ -120,8 +124,38 @@ class AudioRecorder:
         data = result[0]
         # Flatten and convert
         audio_native = data.flatten().astype(np.int16)
+
+        # Track amplitude for stream liveness detection
+        amplitude = np.abs(audio_native).mean()
+        if amplitude > STREAM_DEAD_AMPLITUDE:
+            self._last_nonsilent_time = time.monotonic()
+
         audio_16k = resample(audio_native, self.sample_rate, TARGET_SAMPLE_RATE)
         return audio_16k.tobytes()
+
+    def check_stream_health(self) -> bool:
+        """Return True if the stream is delivering real audio data.
+
+        Detects the 'alive but deaf' condition where PipeWire/PortAudio
+        silently stops delivering audio but the stream doesn't stall.
+        """
+        if self.stream is None:
+            return True
+        silent_duration = time.monotonic() - self._last_nonsilent_time
+        return silent_duration < STREAM_SILENCE_TIMEOUT
+
+    def force_reopen(self):
+        """Force-close and reopen the audio stream for dead-stream recovery."""
+        log.warning(
+            "Audio stream appears dead — reopening",
+            extra={
+                "event": "stream_dead_reopen",
+                "silent_seconds": int(time.monotonic() - self._last_nonsilent_time),
+            },
+        )
+        self.close_stream()
+        time.sleep(0.5)  # let PipeWire/ALSA settle
+        self.open_stream(flush_buffer=True)
 
     def record_until_silence(self, max_seconds: float = 10.0) -> bytes:
         """Record audio until silence is detected or max time reached."""

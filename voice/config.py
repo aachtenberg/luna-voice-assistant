@@ -34,6 +34,8 @@ CHUNK_DURATION = 0.08  # Fixed 80ms: OpenWakeWord frame size requirement
 # Audio reliability
 AUDIO_READ_TIMEOUT = float(os.getenv("AUDIO_READ_TIMEOUT", "5.0"))
 FLUSH_SECONDS = float(os.getenv("FLUSH_SECONDS", "1.2"))
+STREAM_SILENCE_TIMEOUT = float(os.getenv("STREAM_SILENCE_TIMEOUT", "120"))  # seconds of silence before stream reopen
+STREAM_DEAD_AMPLITUDE = float(os.getenv("STREAM_DEAD_AMPLITUDE", "3.0"))  # amplitude floor for liveness
 
 # Silence / recording
 SILENCE_THRESHOLD = int(os.getenv("SILENCE_THRESHOLD", "50"))

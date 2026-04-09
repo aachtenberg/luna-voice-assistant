@@ -83,6 +83,11 @@ LISTENING_STATE = Gauge(
     'Voice service listening state (1=listening, 0=processing)'
 )
 
+STREAM_DEAD_RECOVERIES = Counter(
+    'voice_stream_dead_recoveries_total',
+    'Times stream was reopened due to sustained silence (dead stream)'
+)
+
 
 def get_metrics():
     """Return metrics in Prometheus format."""
