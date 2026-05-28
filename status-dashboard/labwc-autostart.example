@@ -1,0 +1,19 @@
+# Example labwc autostart for the Luna status kiosk.
+#
+# labwc reads ~/.config/labwc/autostart if it exists, INSTEAD of the system
+# default (/etc/xdg/labwc/autostart) — it does not merge them. So do NOT use
+# this file as-is or you'll lose the desktop panel/wallpaper. Instead, copy the
+# system default and append the kiosk line:
+#
+#   mkdir -p ~/.config/labwc
+#   cp /etc/xdg/labwc/autostart ~/.config/labwc/autostart   # only if you don't already have one
+#   # then append the lwrespawn line below
+#
+# The default Raspberry Pi OS (labwc) autostart looks like:
+/usr/bin/lwrespawn /usr/bin/pcmanfm-pi &
+/usr/bin/lwrespawn /usr/bin/wf-panel-pi &
+/usr/bin/kanshi &
+/usr/bin/lxsession-xdg-autostart
+
+# Luna Voice status dashboard, full-screen kiosk (respawns if it exits):
+/usr/bin/lwrespawn /home/aachten/luna-voice-assistant/status-dashboard/launch-kiosk.sh &

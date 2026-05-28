@@ -79,10 +79,11 @@ def _metrics():
         "conversations": _PLAIN(text, "voice_conversations_total"),
         "tts_requests": _PLAIN(text, "voice_tts_requests_total"),
         "stream_recoveries": _PLAIN(text, "voice_stream_dead_recoveries_total"),
-        "stt_ok": _LABELLED(text, "voice_stt_requests_total", 'status="ok"'),
-        "stt_error": _LABELLED(text, "voice_stt_requests_total", 'status="error"'),
-        "brain_ok": _LABELLED(text, "voice_brain_requests_total", 'status="ok"'),
-        "brain_error": _LABELLED(text, "voice_brain_requests_total", 'status="error"'),
+        # voice/main.py emits STT status as success|empty and brain status as
+        # success (no "error"/"ok" labels) — match those exactly.
+        "stt_success": _LABELLED(text, "voice_stt_requests_total", 'status="success"'),
+        "stt_empty": _LABELLED(text, "voice_stt_requests_total", 'status="empty"'),
+        "brain_success": _LABELLED(text, "voice_brain_requests_total", 'status="success"'),
     }, True
 
 
@@ -222,8 +223,9 @@ async function tick(){
     const cards = [
       ["Conversations", n(m.conversations)],
       ["Wake words",    n(m.wakeword_detections)],
-      ["STT ok",        n(m.stt_ok)],
-      ["Brain ok",      n(m.brain_ok)],
+      ["STT ok",        n(m.stt_success)],
+      ["STT empty",     n(m.stt_empty)],
+      ["Brain ok",      n(m.brain_success)],
       ["TTS",           n(m.tts_requests)],
       ["Stream recov.", n(m.stream_recoveries)],
     ];

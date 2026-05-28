@@ -1,0 +1,14 @@
+[Unit]
+Description=Luna Voice Status Dashboard (HTTP :8090)
+Wants=network-online.target
+After=network-online.target luna-voice.service
+
+[Service]
+User=aachten
+WorkingDirectory=/home/aachten/luna-voice-assistant/status-dashboard
+ExecStart=/usr/bin/python3 /home/aachten/luna-voice-assistant/status-dashboard/server.py
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
