@@ -183,7 +183,7 @@ OLLAMA_MODEL_REFRESH_SECONDS=5
 
 # Groq (if using Groq)
 GROQ_API_KEY=gsk_xxx
-GROQ_MODEL=llama-3.1-70b-versatile
+GROQ_MODEL=llama-3.3-70b-versatile
 
 # Services
 MQTT_BROKER=192.168.x.x
@@ -405,6 +405,11 @@ To add Tuya devices, you need to extract local keys via Tuya IoT platform - not 
 │   ├── tts.py               # Piper TTS
 │   ├── luna-voice.service   # Systemd unit for bare-metal runtime
 │   └── assets/              # Wake word models
+├── status-dashboard/         # Full-screen kiosk status display
+│   ├── server.py            # Aggregates systemd + /metrics → /api/status (:8090)
+│   ├── launch-kiosk.sh      # Chromium kiosk launcher (Wayland/labwc)
+│   ├── luna-status-dashboard.service  # Systemd unit for the HTTP server
+│   └── labwc-autostart.example        # Example kiosk autostart entry
 ├── docs/
 │   └── k3s-deploy.md        # Build/deploy runbook for k3s
 └── docker-compose.yml
@@ -449,6 +454,30 @@ The service will automatically restart on failures, wait for the network to be o
 To follow logs:
 ```
 sudo journalctl -u luna-voice.service -f
+```
+
+## Status dashboard (optional kiosk display)
+
+`status-dashboard/` provides a full-screen status display for a Pi attached to a
+monitor. `server.py` (stdlib only) aggregates the `luna-voice.service` systemd
+state and the voice `/metrics` endpoint into a same-origin `/api/status` feed and
+serves a dashboard on `:8090` — a color-coded status orb (listening / processing /
+starting / offline), uptime, and live counters (conversations, wake words, STT
+ok/empty, brain ok, TTS, stream recoveries).
+
+Install the HTTP server as a service:
+```
+sudo cp status-dashboard/luna-status-dashboard.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now luna-status-dashboard.service
+```
+
+Launch it full-screen at login. On Raspberry Pi OS (labwc/Wayland), add the kiosk
+to your labwc autostart — see `status-dashboard/labwc-autostart.example` (note:
+`~/.config/labwc/autostart` replaces the system default rather than merging, so
+copy the system file first and append the kiosk line). To test the kiosk manually:
+```
+status-dashboard/launch-kiosk.sh
 ```
 
 # License
