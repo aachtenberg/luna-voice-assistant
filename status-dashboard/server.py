@@ -170,15 +170,15 @@ PAGE = r"""<!DOCTYPE html>
   .label { font-size:8vmin; font-weight:700; letter-spacing:.04em; text-transform:uppercase; line-height:1; text-align:center; }
   .sub   { font-size:2.6vmin; color:var(--muted); text-align:center; }
   .stats {
-    display:flex; justify-content:center; gap:1.6vmin; flex-wrap:wrap;
-    margin-top:1vmin; max-width:96vw;
+    display:flex; justify-content:center; gap:2vmin; flex-wrap:wrap;
+    margin-top:1.5vmin; max-width:98vw;
   }
   .stat {
-    background:var(--card); border-radius:1.6vmin; padding:1.8vmin 2.6vmin;
-    min-width:16vmin; text-align:center;
+    background:var(--card); border-radius:2vmin; padding:2.6vmin 3.6vmin;
+    min-width:21vmin; text-align:center;
   }
-  .stat .v { font-size:3.8vmin; font-weight:700; line-height:1; }
-  .stat .k { font-size:1.5vmin; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; margin-top:.8vmin; }
+  .stat .v { font-size:5.4vmin; font-weight:700; line-height:1; }
+  .stat .k { font-size:2.1vmin; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; margin-top:1.1vmin; }
   .err .v { color:#ff6b6b; }
   .stale { position:fixed; top:2vmin; right:2.5vmin; font-size:1.8vmin; color:#ff6b6b; opacity:0; transition:opacity .3s; }
   .stale.on { opacity:1; }
