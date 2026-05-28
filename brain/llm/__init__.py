@@ -47,7 +47,7 @@ def _build_single_provider(
             raise ValueError("groq_api_key is required for Groq provider")
         return GroqProvider(
             api_key=groq_api_key,
-            model=groq_model or "llama-3.1-70b-versatile",
+            model=groq_model or "llama-3.3-70b-versatile",
             tool_registry=tool_registry,
         )
 

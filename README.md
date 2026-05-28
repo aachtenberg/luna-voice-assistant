@@ -183,7 +183,7 @@ OLLAMA_MODEL_REFRESH_SECONDS=5
 
 # Groq (if using Groq)
 GROQ_API_KEY=gsk_xxx
-GROQ_MODEL=llama-3.1-70b-versatile
+GROQ_MODEL=llama-3.3-70b-versatile
 
 # Services
 MQTT_BROKER=192.168.x.x
