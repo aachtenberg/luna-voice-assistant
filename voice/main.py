@@ -55,20 +55,35 @@ def on_mqtt_message(client, userdata, msg):
         log.error(f"Error parsing MQTT message: {e}", extra={"event": "mqtt_error"})
 
 
-def start_mqtt_listener():
-    """Start MQTT client in background thread."""
-    client = mqtt.Client()
-    client.on_message = on_mqtt_message
+def on_mqtt_connect(client, userdata, flags, reason_code, properties):
+    """(Re)subscribe on every successful connect, including auto-reconnects.
 
-    try:
-        client.connect(MQTT_BROKER, MQTT_PORT, 60)
+    Subscriptions are lost on disconnect, so they must be re-issued here rather
+    than once at startup.
+    """
+    if reason_code == 0:
         client.subscribe(TIMER_TOPIC)
         log.info(f"Subscribed to MQTT topic: {TIMER_TOPIC}", extra={"event": "mqtt_connected"})
-        client.loop_start()
-        return client
-    except Exception as e:
-        log.error(f"MQTT connection failed: {e}", extra={"event": "mqtt_error"})
-        return None
+    else:
+        log.error(f"MQTT connect refused: {reason_code}", extra={"event": "mqtt_error"})
+
+
+def start_mqtt_listener():
+    """Start MQTT client with automatic reconnection in a background thread.
+
+    Uses connect_async + loop_start so a broker that is briefly unreachable at
+    startup (e.g. cluster networking not yet ready on a freshly-joined k3s node)
+    does not permanently disable timer announcements. loop_start retries the
+    initial connection and auto-reconnects on later drops; on_mqtt_connect
+    re-subscribes each time.
+    """
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    client.on_connect = on_mqtt_connect
+    client.on_message = on_mqtt_message
+    client.reconnect_delay_set(min_delay=1, max_delay=60)
+    client.connect_async(MQTT_BROKER, MQTT_PORT, 60)
+    client.loop_start()
+    return client
 
 
 def _speak_with_barge_in(recorder, detector, token_iter, on_first_audio=None):
