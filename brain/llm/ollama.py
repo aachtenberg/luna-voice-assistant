@@ -364,7 +364,7 @@ class OllamaProvider(LLMProvider):
                         break
             LLM_CALLS_TOTAL.labels(provider="ollama", model=model).inc()
             LLM_DURATION.labels(provider="ollama").observe(time.time() - start_time)
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
+        except httpx.HTTPError as e:
             LLM_ERRORS.labels(provider="ollama", error_type=type(e).__name__).inc()
             raise  # propagate to FallbackProvider
         except Exception as e:
@@ -392,7 +392,7 @@ class OllamaProvider(LLMProvider):
             LLM_CALLS_TOTAL.labels(provider="ollama", model=model).inc()
             LLM_DURATION.labels(provider="ollama").observe(time.time() - start_time)
             return result
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
+        except httpx.HTTPError as e:
             LLM_ERRORS.labels(provider="ollama", error_type=type(e).__name__).inc()
             raise  # propagate to FallbackProvider
         except Exception as e:
