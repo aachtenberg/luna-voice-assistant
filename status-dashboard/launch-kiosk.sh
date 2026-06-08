@@ -14,6 +14,7 @@ done
 exec chromium --kiosk --ozone-platform=wayland \
   --app="$URL" \
   --user-data-dir="$HOME/.config/luna-kiosk" \
+  --password-store=basic \
   --noerrdialogs --disable-infobars --no-first-run \
   --disable-session-crashed-bubble --check-for-update-interval=31536000 \
   --disable-features=Translate
