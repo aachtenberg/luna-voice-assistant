@@ -13,14 +13,15 @@ class GroqProvider(LLMProvider):
         self.model = model
         self.tool_registry = tool_registry
 
-    def chat(self, user_message: str, system_prompt: str, tools: list) -> str:
+    def chat(self, user_message: str, system_prompt: str, tools: list, history: list = None) -> str:
         """Send a message to Groq and handle tool calls."""
         full_prompt = system_prompt + self.get_time_context()
 
-        messages = [
-            {"role": "system", "content": full_prompt},
-            {"role": "user", "content": user_message}
-        ]
+        messages = [{"role": "system", "content": full_prompt}]
+        # Add conversation history (OpenAI-style roles, as stored by main.py)
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
 
         groq_tools = convert_tools_to_openai(tools)
 
