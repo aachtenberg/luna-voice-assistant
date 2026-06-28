@@ -89,26 +89,49 @@ curl -X POST http://luna-brain.apps.svc.cluster.local:8000/ask \
 
 ## Building and Deploying (brain)
 
-`docker` is not available on the cluster nodes (permission denied). Use `nerdctl` instead.
-
-**Critical**: nerdctl's default namespace is invisible to k3s. You must build into the `k8s.io` namespace and then import the image into k3s's containerd store.
+**GitOps — just push to `main`.** Deployment is fully automated; there is no
+manual image build and no node access.
 
 ```bash
-# 1. Build the image into the k8s.io namespace (NOT default nerdctl namespace)
-sudo nerdctl --namespace k8s.io build --no-cache -t homelab-app-brain:latest ./brain/
+git add brain/ && git commit -m "..." && git push   # to main
+```
 
-# 2. Import into k3s containerd image store
-sudo nerdctl --namespace k8s.io save homelab-app-brain:latest | sudo k3s ctr images import -
+Pipeline (on any push touching `brain/**`):
+1. `.github/workflows/build-luna-brain.yml` builds a **linux/arm64** image (the
+   pod is pinned to raspberrypi3) via QEMU and pushes
+   `ghcr.io/aachtenberg/luna-brain:main` + immutable `:main-<sha7>` to GHCR.
+2. Its `bump-deploy-repo` job commits the new tag into the private deploy repo
+   `luna-voice-assistant-deploy` (auth via the `LUNA_DEPLOY_PAT` repo secret).
+3. ArgoCD's standalone `luna-brain` Application syncs the bump and rolls the pod.
 
-# 3. Restart the deployment to pick up the new image
-kubectl rollout restart deploy/luna-brain -n apps
-kubectl rollout status deploy/luna-brain -n apps --timeout=60s
+Watch it land:
+```bash
+gh run watch -R aachtenberg/luna-voice-assistant   # the build
+kubectl get application luna-brain -n argocd -w     # the rollout
 ```
 
 **Notes**:
-- `--no-cache` is required to avoid stale cached layers.
-- The `nerdctl save | k3s ctr import` pipe is needed because nerdctl's k8s.io namespace and k3s's internal containerd store are separate registries.
-- Image pull policy in the deployment must be `Never` (or `IfNotPresent`) so k3s uses the locally imported image.
+- The deploy manifests (topology-bearing) live in the private repo, NOT here.
+- The cluster pulls from GHCR via the `ghcr-pull-secret` already in the `apps` namespace.
+- Don't hand-edit live resources — ArgoCD `selfHeal` reverts them; change git.
+- Legacy: the old hand-built `homelab-app-brain` + `imagePullPolicy: Never` /
+  `nerdctl ... | k3s ctr images import` flow is **retired**.
+
+## Switching the LLM at runtime
+
+The brain builds its provider once at startup from env vars, but exposes
+`/admin/provider` to switch provider/model **live** (no redeploy):
+
+```bash
+curl http://<brain>:8000/admin/provider                 # GET  — current config + active chain
+curl -X POST http://<brain>:8000/admin/provider \       # POST — partial update (only sent fields change)
+  -H "Content-Type: application/json" -d '{"provider":"groq"}'
+curl -X DELETE http://<brain>:8000/admin/provider        # revert to env defaults
+```
+
+The override persists to `LLM_OVERRIDE_PATH` (default `/app/data/llm_override.json`,
+on the mounted data volume) so it survives restarts. API keys are never settable
+this way. On the cluster, the deploy repo's `luna-llm` CLI wraps these calls.
 
 ## Sensor Data Schema
 
@@ -124,6 +147,8 @@ kubectl rollout status deploy/luna-brain -n apps --timeout=60s
 - Brain service with Ollama tool calling (qwen2.5:14b via OLLAMA_AUTO_MODEL)
 - Tools: web_search, query_timescaledb, query_prometheus, mqtt_publish, timers, weather, light control
 - LLM fallback chain: Ollama → Groq → Anthropic (FallbackProvider)
+- Runtime LLM switching via `/admin/provider` (persisted override, survives restarts)
+- GitOps CI/CD: push → GH Actions arm64 build → GHCR → deploy-repo bump → ArgoCD
 - Voice service with OpenWakeWord ("hey luna"), Whisper, Piper TTS
 - Audio handling: Anker S330 USB speakerphone via PipeWire
 - Barge-in support (interrupt TTS with wake word)
@@ -169,6 +194,12 @@ Both services use `.env` files (not committed, see `.env.example`):
 - MQTT_BROKER (cluster-internal: `mosquitto.iot.svc.cluster.local`)
 - LOCATION_CITY, LOCATION_REGION, LOCATION_COUNTRY, LOCATION_TIMEZONE, LOCATION_LAT, LOCATION_LON
 - Secrets via k8s Secret `luna-brain-secrets`
+
+These env vars are **startup defaults**. The provider/model routing fields
+(`LLM_PROVIDER`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_AUTO_MODEL`,
+`GROQ_MODEL`, `ANTHROPIC_MODEL`) can be overridden live via `/admin/provider`;
+the override persists to `LLM_OVERRIDE_PATH` (default
+`/app/data/llm_override.json`) and is re-applied at startup.
 
 **voice/.env** (uses k3s ClusterIPs — voice runs bare metal on a k3s node):
 ```

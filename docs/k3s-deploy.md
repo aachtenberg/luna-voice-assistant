@@ -1,170 +1,123 @@
 # Build and Deploy to k3s
 
-This repository currently does not include Kubernetes manifests.
-Kubernetes manifests and deployment configuration live in:
-- https://github.com/aachtenberg/homelab-infra
+`brain/` runs on k3s; `voice/` runs bare metal on a Raspberry Pi (USB audio).
+Only `brain/` is containerized/deployed.
 
-Use that repository as the source of truth for namespaces, deployment specs,
-service definitions, ingress, configmaps, and secrets.
+Deployment is **GitOps**. This public repo holds the application code and the
+CI workflow; the topology-bearing Kubernetes manifests live in a **private**
+deploy repo:
+- Code + CI: this repo (`luna-voice-assistant`)
+- Manifests: `https://github.com/aachtenberg/luna-voice-assistant-deploy`
+  (Deployment, Service, `kustomization.yml`) — private because it embeds LAN
+  IPs, cluster DNS, a node pin, and host paths.
 
-Current `homelab-infra` deployment model for `luna-brain` (at time of writing):
-- Deployment image: `homelab-app-brain`
-- `imagePullPolicy: Never`
-- Node pinning: `kubernetes.io/hostname: raspberrypi3`
+ArgoCD's standalone `luna-brain` Application (registered in `homelab-infra`)
+syncs the deploy repo and is the source of truth for the running state.
 
-The expected workflow from this app repository is:
-1. Build/update the `homelab-app-brain` image on the node that runs `luna-brain`.
-2. Apply/update manifests from `homelab-infra` as needed.
-3. Restart rollout and run smoke tests.
+Current deployment model for `luna-brain`:
+- Image: `ghcr.io/aachtenberg/luna-brain` (pinned to an immutable `:main-<sha7>`
+  tag by the `images:` block in the deploy repo's `kustomization.yml`)
+- `imagePullPolicy: IfNotPresent`, pulled with the `ghcr-pull-secret` in the
+  `apps` namespace
+- Node pin: `kubernetes.io/hostname: raspberrypi3` (so the image is built for
+  **linux/arm64**)
 
-These instructions assume your cluster already has:
-- Namespace `apps`
-- Deployment `luna-brain`
-- Service `luna-brain` on port `8000`
-
-## 1) Prerequisites
-
-On your workstation:
-- `kubectl` configured for your k3s cluster context
-- Access to the node running `luna-brain` (currently `raspberrypi3`) for local image builds
-
-On the node that builds the image:
-- `nerdctl`
-- `k3s ctr`
-
-Verify context and current workload:
+## The deploy flow (push to main)
 
 ```bash
-kubectl config current-context
-kubectl -n apps get deploy luna-brain
-kubectl -n apps get pods -l app.kubernetes.io/name=luna-brain
+git add brain/ && git commit -m "..." && git push   # to main
 ```
 
-## 2) Build image for current infra model (local node image)
+That's it. On any push touching `brain/**`:
 
-Build on the node that hosts `luna-brain` so kubelet can use the locally imported image. `docker` is not available on the cluster nodes; use `nerdctl` in the `k8s.io` namespace and then import the image into k3s's containerd store:
+1. **Build** — `.github/workflows/build-luna-brain.yml` builds a `linux/arm64`
+   image via QEMU and pushes two tags to GHCR:
+   `ghcr.io/aachtenberg/luna-brain:main` and `:main-<sha7>`.
+2. **Bump** — its `bump-deploy-repo` job runs `kustomize edit set image` in the
+   private deploy repo and commits the new `:main-<sha7>` tag straight to that
+   repo's `main` (auth via the `LUNA_DEPLOY_PAT` repo secret on this repo; the
+   GHCR push itself uses the built-in `GITHUB_TOKEN`).
+3. **Sync** — ArgoCD (`automated`, `selfHeal`, `prune`) reconciles the bump and
+   rolls the Deployment. The old pod keeps serving until the new one is Ready.
 
-```bash
-ssh aachten@raspberrypi3 '
-  cd /home/aachten/luna-voice-assistant &&
-  sudo nerdctl --namespace k8s.io build --no-cache -t homelab-app-brain:latest ./brain &&
-  sudo nerdctl --namespace k8s.io save homelab-app-brain:latest | sudo k3s ctr images import -
-'
-```
-
-Then restart the deployment:
-
-```bash
-kubectl -n apps rollout restart deployment/luna-brain
-kubectl -n apps rollout status deployment/luna-brain --timeout=180s
-```
-
-Notes:
-- `--no-cache` avoids stale layers during homelab builds
-- The `nerdctl save | k3s ctr images import` pipe is required because nerdctl and k3s use separate containerd stores
-- `imagePullPolicy` should remain `Never` or `IfNotPresent` for this local-image workflow
-
-Optional future model: registry-backed immutable images
-
-If you change `homelab-infra` to use registry images (and a non-`Never` pull policy), use immutable tags:
+Watch it land:
 
 ```bash
-export IMAGE_REPO=ghcr.io/aachtenberg/luna-brain
-export IMAGE_TAG=$(git rev-parse --short HEAD)
-export IMAGE=${IMAGE_REPO}:${IMAGE_TAG}
-
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  -f brain/Dockerfile \
-  -t ${IMAGE} \
-  --push \
-  ./brain
-```
-
-## 3) Deploy via homelab-infra
-
-Preferred path (GitOps-style) is to update image tags in the infra repo and apply:
-
-```bash
-git clone https://github.com/aachtenberg/homelab-infra.git
-cd homelab-infra
-
-# Update `k3s/base/apps/luna-brain.yml` as needed, commit, then apply
-kubectl apply -f <path-to-luna-brain-manifests>
-kubectl -n apps rollout status deployment/luna-brain --timeout=180s
-```
-
-If you need a fast/manual hotfix, patch image directly in-cluster:
-
-```bash
-kubectl -n apps set image deployment/luna-brain luna-brain=homelab-app-brain:latest
-kubectl -n apps rollout status deployment/luna-brain --timeout=180s
-```
-
-Watch pod restarts and logs:
-
-```bash
+gh run watch -R aachtenberg/luna-voice-assistant            # the build + bump
+kubectl get application luna-brain -n argocd -w             # the rollout
 kubectl -n apps get pods -l app.kubernetes.io/name=luna-brain -w
-kubectl -n apps logs -l app.kubernetes.io/name=luna-brain -f --tail=100
+kubectl -n apps logs  -l app.kubernetes.io/name=luna-brain -f --tail=100
 ```
 
-## 4) Environment config in k3s
+> One-time prerequisites (already in place): the `LUNA_DEPLOY_PAT` repo secret
+> (contents:write on the deploy repo), the `ghcr-pull-secret` in the `apps`
+> namespace, and the ArgoCD repo credential for the private deploy repo.
 
-The brain app reads config from env vars.
-For k3s deployments, set values in Deployment env / ConfigMap / Secret in `homelab-infra`.
+## Environment config
 
-Inspect current env wiring:
+The brain reads config from env vars set in the Deployment (in the **deploy
+repo**'s `luna-brain.yml`). To change config, edit that manifest and push — do
+**not** `kubectl set env` / `kubectl edit` live, as ArgoCD `selfHeal` reverts it.
+
+Inspect the live wiring:
 
 ```bash
 kubectl -n apps get deploy luna-brain -o yaml
 ```
 
-Key env vars commonly updated:
-- `LLM_PROVIDER`
-- `OLLAMA_URL`
-- `OLLAMA_AUTO_MODEL`
-- `OLLAMA_MODEL` (fallback model)
-- `OLLAMA_MODEL_REFRESH_SECONDS`
-- `TIMESCALEDB_HOST`, `TIMESCALEDB_PORT`, `TIMESCALEDB_DATABASE`, `TIMESCALEDB_USER`, `TIMESCALEDB_PASSWORD`
-- `SEARXNG_URL`
-- `MQTT_BROKER`
-- `PROMETHEUS_URL`
-- `LOCATION_CITY`, `LOCATION_REGION`, `LOCATION_COUNTRY`, `LOCATION_TIMEZONE`, `LOCATION_LAT`, `LOCATION_LON`
-- API keys via Secret refs (`ANTHROPIC_API_KEY`, `GROQ_API_KEY`)
+Common vars: `LLM_PROVIDER`, `OLLAMA_URL`, `OLLAMA_AUTO_MODEL`, `OLLAMA_MODEL`,
+`OLLAMA_MODEL_REFRESH_SECONDS`, `GROQ_MODEL`, `ANTHROPIC_MODEL`, `SEARXNG_URL`,
+`MQTT_BROKER`, `PROMETHEUS_URL`, `INFLUXDB_URL`/`INFLUXDB_DATABASE`, the
+`LOCATION_*` set, and API keys via Secret refs (`ANTHROPIC_API_KEY`,
+`GROQ_API_KEY`, `INFLUXDB_TOKEN`) from the `luna-brain-secrets` SealedSecret.
 
-After env changes are applied from `homelab-infra`, restart rollout if needed:
+### Switching the LLM without a deploy
+
+Provider/model routing can be changed **live** via `/admin/provider` (no
+restart, persisted to `LLM_OVERRIDE_PATH` on the data volume). On the cluster,
+use the `luna-llm` CLI in the deploy repo:
 
 ```bash
-kubectl -n apps rollout restart deployment/luna-brain
-kubectl -n apps rollout status deployment/luna-brain --timeout=180s
+./luna-llm                 # show current config + live chain
+./luna-llm set provider=groq
+./luna-llm set provider=ollama ollama_model=qwen2.5:14b
+./luna-llm reset           # back to env-var defaults
 ```
 
-## 5) Smoke test
+API keys are never set this way — they always come from the Secret.
 
-From any node with cluster DNS access:
+## Smoke test
+
+The Service is ClusterIP-only and the pod has python but not curl:
 
 ```bash
-curl -X POST http://luna-brain.apps.svc.cluster.local:8000/ask \
-  -H "Content-Type: application/json" \
-  -d '{"text":"what time is it?"}'
+kubectl exec -n apps deploy/luna-brain -- python -c \
+ "import urllib.request,json;print(urllib.request.urlopen(urllib.request.Request('http://localhost:8000/ask',data=json.dumps({'text':'what time is it?'}).encode(),headers={'Content-Type':'application/json'})).read().decode())"
+
+# Metrics
+kubectl exec -n apps deploy/luna-brain -- python -c \
+ "import urllib.request;print(urllib.request.urlopen('http://localhost:8000/metrics').read().decode())" | grep brain_current_provider
 ```
 
-Check metrics endpoint:
+## Rollback
+
+Revert via git — ArgoCD follows:
 
 ```bash
-kubectl -n apps port-forward deploy/luna-brain 8000:8000
-curl http://127.0.0.1:8000/metrics
+# In the deploy repo: revert the bad image bump (or set an older :main-<sha7>) and push.
+git -C luna-voice-assistant-deploy revert <bump-sha> && git push
 ```
 
-## 6) Rollback (if needed)
-
-```bash
-kubectl -n apps rollout undo deployment/luna-brain
-kubectl -n apps rollout status deployment/luna-brain --timeout=180s
-```
+Because every build publishes an immutable `:main-<sha7>` tag, any prior known-good
+tag can be pinned back in `kustomization.yml` for a fast rollback. Avoid
+in-cluster `kubectl rollout undo` — ArgoCD will re-sync to whatever git says.
 
 ## Notes
 
-- `voice/` is intended to run on bare metal Raspberry Pi for USB audio access; only `brain/` is containerized/deployed on k3s.
-- For production, pin images to immutable tags (commit SHA), avoid `latest`, and keep at least one known-good tag for fast rollback.
-- Keep deployment state declarative in `homelab-infra`; avoid long-term drift from manual `kubectl set image` changes.
+- `voice/` runs on bare-metal Raspberry Pi for USB audio access; only `brain/`
+  is containerized/deployed on k3s.
+- Keep deployment state declarative in the deploy repo; avoid manual `kubectl`
+  drift, which `selfHeal` fights.
+- Legacy: luna-brain used to be a hand-built `homelab-app-brain` image with
+  `imagePullPolicy: Never`, imported on the node via `nerdctl ... | k3s ctr
+  images import`. That path is retired.

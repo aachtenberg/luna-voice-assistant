@@ -18,7 +18,8 @@ on:
     branches: [main]
     paths:
       - 'brain/**'
-      - '.github/workflows/build-luna-brain.yml'
+      - '!brain/**.md'
+      - '!brain/.env.example'
   workflow_dispatch:
 
 permissions:

@@ -6,7 +6,8 @@ Self-hosted voice assistant replacing Alexa with local/cloud LLMs, smart home co
 
 - **Wake word detection** - Custom "Hey Luna" model via OpenWakeWord
 - **Speech-to-text** - faster-whisper (runs on server)
-- **LLM backends** - Anthropic Claude, Ollama (local), or Groq
+- **LLM backends** - Anthropic Claude, Ollama (local), or Groq — single provider or an automatic fallback chain
+- **Runtime LLM switching** - swap provider/model live via the brain's `/admin/provider` API (no restart; persists across restarts)
 - **Text-to-speech** - Piper TTS (local, fast)
 - **Smart home control** - Kasa switches, WiZ bulbs
 - **Tools** - Web search (SearXNG), weather (Open-Meteo), sensor data (TimescaleDB), timers
@@ -258,25 +259,21 @@ cd voice && source venv/bin/activate
 python main.py
 ```
 
-**Option C: k3s (recommended for homelab cluster)**
+**Option C: k3s (homelab cluster, GitOps)**
 
 `brain/` is deployed to k3s, while `voice/` runs bare metal on Raspberry Pi.
-Kubernetes manifests/source of truth: https://github.com/aachtenberg/homelab-infra
+Deployment is fully GitOps — **just push to `main`**:
 
-Quick deploy flow:
-```bash
-# docker is not available on cluster nodes — use nerdctl with k8s.io namespace
-sudo nerdctl --namespace k8s.io build --no-cache -t homelab-app-brain:latest ./brain/
+1. The [`build-luna-brain`](.github/workflows/build-luna-brain.yml) GitHub
+   Actions workflow builds a `linux/arm64` image (the pod is pinned to a Pi) and
+   pushes `ghcr.io/aachtenberg/luna-brain:main` + an immutable `:main-<sha>` tag.
+2. It then bumps the image tag in the private deploy repo
+   (`luna-voice-assistant-deploy`, which holds the topology-bearing manifests).
+3. ArgoCD syncs the bump and rolls the pod.
 
-# Import into k3s containerd store (nerdctl and k3s use separate stores)
-sudo nerdctl --namespace k8s.io save homelab-app-brain:latest | sudo k3s ctr images import -
-
-# Restart deployment
-kubectl rollout restart deploy/luna-brain -n apps
-kubectl rollout status deploy/luna-brain -n apps --timeout=60s
-```
-
-Preferred: keep deployment state in `homelab-infra` manifests; use manual patching only for hotfixes.
+No node access, no manual image build. The deploy manifests live in the private
+[`luna-voice-assistant-deploy`](https://github.com/aachtenberg/luna-voice-assistant-deploy)
+repo; see its README for the full pipeline + the `luna-llm` switch CLI.
 
 Full guide: `docs/k3s-deploy.md`
 
@@ -292,6 +289,35 @@ Say "Hey Luna" followed by your command:
 
 ### Follow-up Conversations
 When Luna asks a question (response ends with "?"), she listens for your answer without needing the wake word again.
+
+### Switching the LLM backend at runtime
+
+The `LLM_PROVIDER` / `*_MODEL` env vars are the **startup defaults**. You can
+switch the provider or model **live** — without a restart — via the brain's
+`/admin/provider` endpoint:
+
+```bash
+# Inspect the current routing config + live provider chain
+curl http://<brain-host>:8000/admin/provider
+
+# Switch provider and/or model (only the supplied fields change)
+curl -X POST http://<brain-host>:8000/admin/provider \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "groq"}'
+curl -X POST http://<brain-host>:8000/admin/provider \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "ollama", "ollama_model": "qwen2.5:14b"}'
+
+# Revert to the env-var defaults
+curl -X DELETE http://<brain-host>:8000/admin/provider
+```
+
+The override is persisted to the data volume (`LLM_OVERRIDE_PATH`, default
+`brain/data/llm_override.json`) so it survives restarts. A switch is rejected
+(and the running provider kept) if the new config can't be built — e.g. a
+required API key is missing. **API keys are never set this way**; they always
+come from the environment/secret. On the homelab cluster, the `luna-llm` CLI in
+the deploy repo wraps these calls.
 
 ## Gotchas & Troubleshooting
 
@@ -383,8 +409,12 @@ To add Tuya devices, you need to extract local keys via Tuya IoT platform - not 
 ## Project Structure
 
 ```
+├── .github/workflows/
+│   └── build-luna-brain.yml # CI: build arm64 image → GHCR → bump deploy repo
 ├── brain/                    # FastAPI LLM service
-│   ├── main.py              # API endpoints
+│   ├── main.py              # API endpoints (/ask, /ask/stream, /admin/provider)
+│   ├── config.py            # Env-based startup config
+│   ├── runtime_config.py    # Persisted runtime LLM override (load/save/clear)
 │   ├── llm/                 # LLM provider implementations
 │   │   ├── anthropic.py     # Claude
 │   │   ├── ollama.py        # Local Ollama

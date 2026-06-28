@@ -57,20 +57,18 @@ This repository contains a self-hosted voice assistant split across two Python s
 
 ## Building and Deploying (brain)
 
-`docker` is not available on cluster nodes. Use `nerdctl` with the `k8s.io` namespace.
+Deployment is **GitOps** — push to `main` and the pipeline does the rest. There
+is no manual image build.
 
 ```bash
-# Build into k8s.io namespace (default nerdctl namespace is invisible to k3s)
-sudo nerdctl --namespace k8s.io build --no-cache -t homelab-app-brain:latest ./brain/
-
-# Import into k3s containerd store
-sudo nerdctl --namespace k8s.io save homelab-app-brain:latest | sudo k3s ctr images import -
-
-# Restart pod
-kubectl rollout restart deploy/luna-brain -n apps
-kubectl rollout status deploy/luna-brain -n apps --timeout=60s
+git add brain/ && git commit -m "..." && git push   # to main
 ```
 
-- Always use `--no-cache` to prevent stale layers.
-- The save/import pipe is required — nerdctl and k3s use separate containerd stores.
-- Deployment `imagePullPolicy` must be `Never` or `IfNotPresent` to use the locally imported image.
+- `.github/workflows/build-luna-brain.yml` builds a `linux/arm64` image (pod is
+  pinned to a Pi), pushes `ghcr.io/aachtenberg/luna-brain:main` + `:main-<sha7>`
+  to GHCR, then bumps the private `luna-voice-assistant-deploy` repo.
+- ArgoCD syncs the bump and rolls the pod. Don't hand-edit live resources —
+  `selfHeal` reverts them; change git instead.
+- The topology-bearing deploy manifests live in the private deploy repo, not here.
+- Legacy: the hand-built `homelab-app-brain` + `imagePullPolicy: Never` /
+  `nerdctl ... | k3s ctr images import` flow is retired.
