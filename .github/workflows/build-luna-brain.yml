@@ -1,0 +1,105 @@
+name: Build luna-brain on main
+
+# On every push to main that touches brain/, build the luna-brain image, push
+# to ghcr.io, and commit the new immutable sha-tag straight to the PRIVATE
+# deploy repo aachtenberg/luna-voice-assistant-deploy (ArgoCD's standalone
+# `luna-brain` Application syncs that repo). No cross-repo PR / manual merge:
+# the bump is a mechanical one-liner, so it lands directly on the deploy repo's
+# main and ArgoCD rolls the pod automatically.
+#
+# Requires repo secret LUNA_DEPLOY_PAT: a token with contents:write on
+# aachtenberg/luna-voice-assistant-deploy.
+#
+# The luna-brain pod is pinned to raspberrypi3 (arm64), so this is an arm64
+# build via QEMU emulation (slower than native, but matches where it runs).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'brain/**'
+      - '.github/workflows/build-luna-brain.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tag
+        id: tag
+        run: echo "tag=main-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: brain/
+          push: true
+          platforms: linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/luna-brain:main
+            ghcr.io/${{ github.repository_owner }}/luna-brain:${{ steps.tag.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  bump-deploy-repo:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    # Serialize bumps so two quick pushes can't race on the deploy repo's main.
+    concurrency:
+      group: luna-brain-deploy-bump
+      cancel-in-progress: false
+    steps:
+      - name: Checkout luna-voice-assistant-deploy
+        uses: actions/checkout@v4
+        with:
+          repository: aachtenberg/luna-voice-assistant-deploy
+          token: ${{ secrets.LUNA_DEPLOY_PAT }}
+          path: luna-voice-assistant-deploy
+
+      - name: Install kustomize
+        run: |
+          curl -sL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" \
+            | bash -s 5.4.3
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Bump image tag and push
+        working-directory: luna-voice-assistant-deploy
+        run: |
+          kustomize edit set image \
+            ghcr.io/aachtenberg/luna-brain=ghcr.io/aachtenberg/luna-brain:${{ needs.build-and-push.outputs.image-tag }}
+          if git diff --quiet -- kustomization.yml; then
+            echo "Image tag already ${{ needs.build-and-push.outputs.image-tag }}; nothing to commit."
+            exit 0
+          fi
+          git config user.name "luna-brain-ci"
+          git config user.email "luna-brain-ci@users.noreply.github.com"
+          git add kustomization.yml
+          git commit -m "deploy: bump luna-brain to ${{ needs.build-and-push.outputs.image-tag }}" \
+                     -m "Source: ${{ github.repository }}@${{ github.sha }}" \
+                     -m "Build: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          # Rebase-pull in case a concurrent bump landed first, then push.
+          git pull --rebase --autostash origin main
+          git push origin main
+          echo "Pushed bump → ArgoCD will roll the luna-brain deployment."
