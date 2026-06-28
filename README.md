@@ -293,8 +293,9 @@ When Luna asks a question (response ends with "?"), she listens for your answer 
 ### Switching the LLM backend at runtime
 
 The `LLM_PROVIDER` / `*_MODEL` env vars are the **startup defaults**. You can
-switch the provider or model **live** — without a restart — via the brain's
-`/admin/provider` endpoint:
+switch the provider or model **live** — without a restart. The brain serves a
+small web UI at **`GET /admin`** (point a browser at it), or drive the JSON
+`/admin/provider` endpoint directly:
 
 ```bash
 # Inspect the current routing config + live provider chain

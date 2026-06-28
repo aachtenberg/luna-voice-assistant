@@ -119,8 +119,10 @@ kubectl get application luna-brain -n argocd -w     # the rollout
 
 ## Switching the LLM at runtime
 
-The brain builds its provider once at startup from env vars, but exposes
-`/admin/provider` to switch provider/model **live** (no redeploy):
+The brain builds its provider once at startup from env vars, but exposes a web
+UI at `GET /admin` (served on NodePort `30900` → e.g.
+http://192.168.0.111:30900/admin) and a JSON `/admin/provider` API to switch
+provider/model **live** (no redeploy):
 
 ```bash
 curl http://<brain>:8000/admin/provider                 # GET  — current config + active chain
