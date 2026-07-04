@@ -38,7 +38,10 @@ STREAM_SILENCE_TIMEOUT = float(os.getenv("STREAM_SILENCE_TIMEOUT", "120"))  # se
 STREAM_DEAD_AMPLITUDE = float(os.getenv("STREAM_DEAD_AMPLITUDE", "3.0"))  # amplitude floor for liveness
 
 # Silence / recording
-SILENCE_THRESHOLD = int(os.getenv("SILENCE_THRESHOLD", "50"))
+# Anker S330 ambient floor measures 56-98 mean-abs (48kHz); speech is 1700+.
+# Must sit above ambient or silence is never detected and every recording
+# runs to MAX_RECORD_SECONDS.
+SILENCE_THRESHOLD = int(os.getenv("SILENCE_THRESHOLD", "150"))
 SILENCE_DURATION = float(os.getenv("SILENCE_DURATION", "0.7"))
 MIN_RECORD_SECONDS = float(os.getenv("MIN_RECORD_SECONDS", "1.0"))
 MAX_RECORD_SECONDS = float(os.getenv("MAX_RECORD_SECONDS", "10.0"))

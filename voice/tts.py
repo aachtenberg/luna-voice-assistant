@@ -1,3 +1,4 @@
+import hashlib
 import subprocess
 import tempfile
 import os
@@ -6,6 +7,39 @@ import time
 import threading
 import queue
 from config import PIPER_PATH, PIPER_MODEL
+
+# Cache synthesized wavs for short static phrases ("Yes?", "Okay!", ...) so
+# repeated prompts skip the ~0.7s Piper synthesis on every wake word.
+_CACHE_DIR = os.path.expanduser("~/.cache/luna-tts")
+_CACHE_MAX_CHARS = 60
+
+
+def _synth_to_wav(text: str, out_path: str) -> bool:
+    """Run Piper to synthesize text into out_path. Returns True on success."""
+    process = subprocess.run(
+        [PIPER_PATH, "--model", PIPER_MODEL, "--output_file", out_path],
+        input=text.encode(),
+        capture_output=True,
+        timeout=30
+    )
+    if process.returncode != 0:
+        print(f"Piper error: {process.stderr.decode()}")
+        return False
+    return True
+
+
+def _cached_wav(text: str):
+    """Return path to a cached wav for a short phrase, synthesizing once."""
+    try:
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        key = hashlib.sha1(f"{PIPER_MODEL}:{text}".encode()).hexdigest()[:16]
+        path = os.path.join(_CACHE_DIR, f"{key}.wav")
+        if not os.path.exists(path) and not _synth_to_wav(text, path):
+            return None
+        return path
+    except Exception as e:
+        print(f"TTS cache error: {e}")
+        return None
 
 # Global state for barge-in
 _playback_process = None
@@ -39,28 +73,24 @@ def speak(text: str):
     if not text:
         return
 
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp_path = tmp.name
-
+    tmp_path = None
     try:
-        # Run Piper to generate audio
-        process = subprocess.run(
-            [PIPER_PATH, "--model", PIPER_MODEL, "--output_file", tmp_path],
-            input=text.encode(),
-            capture_output=True,
-            timeout=30
-        )
-
-        if process.returncode != 0:
-            print(f"Piper error: {process.stderr.decode()}")
-            return
+        # Short phrases come from the synth cache; longer text is synthesized
+        # into a throwaway temp file.
+        wav_path = _cached_wav(text) if len(text) <= _CACHE_MAX_CHARS else None
+        if wav_path is None:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_path = tmp.name
+            if not _synth_to_wav(text, tmp_path):
+                return
+            wav_path = tmp_path
 
         # Mute mic to prevent TTS from triggering wake word
         _mute_mic(True)
 
         # Play the audio using pw-play (PipeWire) for Bluetooth speaker support
         with _playback_lock:
-            _playback_process = subprocess.Popen(["pw-play", tmp_path])
+            _playback_process = subprocess.Popen(["pw-play", wav_path])
 
         _playback_process.wait(timeout=60)
 
@@ -74,7 +104,7 @@ def speak(text: str):
         _mute_mic(False)
         with _playback_lock:
             _playback_process = None
-        if os.path.exists(tmp_path):
+        if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
 

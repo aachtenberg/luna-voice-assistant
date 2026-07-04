@@ -98,13 +98,16 @@ def _speak_with_barge_in(recorder, detector, token_iter, on_first_audio=None):
     stop_monitor = threading.Event()
 
     def monitor():
+        chunks_read = 0
         try:
             recorder.open_stream(flush_buffer=True)
+            detector.max_score = 0.0
             while not stop_monitor.is_set():
                 try:
                     chunk = recorder.read_chunk()
                 except Exception:
                     break
+                chunks_read += 1
                 if detector.detect(chunk):
                     log.info("Barge-in: wake word during TTS", extra={"event": "barge_in"})
                     barged_in.set()
@@ -112,6 +115,15 @@ def _speak_with_barge_in(recorder, detector, token_iter, on_first_audio=None):
                     break
         except Exception as e:
             log.warning(f"Barge-in monitor error: {e}", extra={"event": "barge_in_error"})
+        finally:
+            # Diagnostic: shows whether mic audio reaches the detector during
+            # TTS (the Anker S330's onboard AEC may suppress capture while
+            # its speaker is playing).
+            log.info(
+                f"Barge-in monitor: {chunks_read} chunks, max wake score {detector.max_score:.2f}",
+                extra={"event": "barge_in_stats", "chunks": chunks_read,
+                       "max_score": round(detector.max_score, 3)}
+            )
 
     monitor_thread = threading.Thread(target=monitor, daemon=True)
     monitor_thread.start()

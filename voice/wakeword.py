@@ -13,6 +13,9 @@ class WakeWordDetector:
         self.engine = WAKEWORD_ENGINE.lower()
         self._porcupine = None
         self._oww_model = None
+        # Highest score seen since last reset — lets callers (barge-in
+        # monitor) report how close detection came even when it never fired.
+        self.max_score = 0.0
 
         if self.engine == "porcupine":
             self._init_porcupine()
@@ -104,6 +107,7 @@ class WakeWordDetector:
         prediction = self._oww_model.predict(audio_data)
 
         for model_name, score in prediction.items():
+            self.max_score = max(self.max_score, float(score))
             if score > self._threshold:
                 print(f"Wake word detected: {model_name} (score: {score:.2f}, amplitude: {amplitude:.0f})")
                 return True
@@ -113,6 +117,7 @@ class WakeWordDetector:
     def reset(self):
         """Reset the model state (clears prediction buffers, keeps model loaded)."""
         print("Resetting wake word detector...")
+        self.max_score = 0.0
         if self.engine == "porcupine":
             # Clear the buffer
             self._buffer = np.array([], dtype=np.int16)
