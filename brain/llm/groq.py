@@ -37,7 +37,7 @@ class GroqProvider(LLMProvider):
                 )
             except Exception as e:
                 print(f"Groq error: {e}")
-                return "Sorry, I couldn't process that request."
+                raise  # propagate to FallbackProvider
 
             message = response.choices[0].message
             tool_calls = message.tool_calls

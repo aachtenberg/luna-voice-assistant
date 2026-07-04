@@ -42,7 +42,7 @@ class AnthropicProvider(LLMProvider):
                 print(f"[Claude] Content: {response.content}")
             except Exception as e:
                 print(f"Anthropic error: {e}")
-                return "Sorry, I couldn't process that request."
+                raise  # propagate to FallbackProvider
 
             # Check if we need to handle tool use
             if response.stop_reason == "tool_use":
