@@ -101,6 +101,7 @@ def _speak_with_barge_in(recorder, detector, token_iter, on_first_audio=None):
     def monitor():
         chunks_read = 0
         max_amplitude = 0.0
+        debug_frames = []
         try:
             recorder.open_stream(flush_buffer=True)
             detector.max_score = 0.0
@@ -112,6 +113,8 @@ def _speak_with_barge_in(recorder, detector, token_iter, on_first_audio=None):
                 chunks_read += 1
                 amp = float(np.abs(np.frombuffer(chunk, dtype=np.int16)).mean()) if chunk else 0.0
                 max_amplitude = max(max_amplitude, amp)
+                if len(debug_frames) < 750:  # cap at 60s of 16kHz audio
+                    debug_frames.append(chunk)
                 if detector.detect(chunk):
                     log.info("Barge-in: wake word during TTS", extra={"event": "barge_in"})
                     barged_in.set()
@@ -130,6 +133,19 @@ def _speak_with_barge_in(recorder, detector, token_iter, on_first_audio=None):
                        "max_score": round(detector.max_score, 3),
                        "max_amplitude": int(max_amplitude)}
             )
+            # Debug: keep the last barge-in window on disk for offline
+            # analysis of what the detector actually hears during TTS.
+            if debug_frames:
+                try:
+                    import wave
+                    with wave.open("/tmp/luna_barge_last.wav", "wb") as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(16000)
+                        wf.writeframes(b"".join(debug_frames))
+                except Exception as e:
+                    log.warning(f"Barge-in debug wav write failed: {e}",
+                                extra={"event": "barge_in_debug_error"})
 
     monitor_thread = threading.Thread(target=monitor, daemon=True)
     monitor_thread.start()
