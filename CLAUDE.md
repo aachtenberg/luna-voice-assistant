@@ -70,7 +70,10 @@ luna-voice-assistant/
 | Piper TTS | raspberrypi3 | Local binary ~/piper/piper |
 | Voice assistant | raspberrypi3 | Wake word + audio + TTS |
 | Ollama | 192.168.0.150 | LLM inference (qwen2.5:14b) |
-| TimescaleDB | 192.168.0.146:5433 | Sensor data |
+
+The old bare-metal TimescaleDB (192.168.0.146:5433) is retired; sensor data
+lives in the k3s `timescaledb` StatefulSet (`timescaledb.data.svc.cluster.local:5432`,
+db `sensors`, user `telegraf`).
 
 ## Commands
 

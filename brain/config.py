@@ -42,13 +42,14 @@ ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
 
 # Groq settings
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+# gpt-oss-120b: 21/21 on tool-calling benchmark; llama-3.3-70b failed 11/21
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 MQTT_BROKER = os.getenv("MQTT_BROKER", "192.168.0.167")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 
-TIMESCALEDB_HOST = os.getenv("TIMESCALEDB_HOST", "192.168.0.146")
-TIMESCALEDB_PORT = int(os.getenv("TIMESCALEDB_PORT", "5433"))
+TIMESCALEDB_HOST = os.getenv("TIMESCALEDB_HOST", "timescaledb.data.svc.cluster.local")
+TIMESCALEDB_PORT = int(os.getenv("TIMESCALEDB_PORT", "5432"))
 TIMESCALEDB_DATABASE = os.getenv("TIMESCALEDB_DATABASE", "sensors")
 TIMESCALEDB_USER = os.getenv("TIMESCALEDB_USER", "telegraf")
 TIMESCALEDB_PASSWORD = os.getenv("TIMESCALEDB_PASSWORD", "7OMyGmIG/5Ech8PYfvg1vykYffuaHNol")
