@@ -7,6 +7,7 @@ import sys
 import time
 import json
 import threading
+import numpy as np
 import paho.mqtt.client as mqtt
 from audio import AudioRecorder
 from wakeword import WakeWordDetector
@@ -99,6 +100,7 @@ def _speak_with_barge_in(recorder, detector, token_iter, on_first_audio=None):
 
     def monitor():
         chunks_read = 0
+        max_amplitude = 0.0
         try:
             recorder.open_stream(flush_buffer=True)
             detector.max_score = 0.0
@@ -108,6 +110,8 @@ def _speak_with_barge_in(recorder, detector, token_iter, on_first_audio=None):
                 except Exception:
                     break
                 chunks_read += 1
+                amp = float(np.abs(np.frombuffer(chunk, dtype=np.int16)).mean()) if chunk else 0.0
+                max_amplitude = max(max_amplitude, amp)
                 if detector.detect(chunk):
                     log.info("Barge-in: wake word during TTS", extra={"event": "barge_in"})
                     barged_in.set()
@@ -120,9 +124,11 @@ def _speak_with_barge_in(recorder, detector, token_iter, on_first_audio=None):
             # TTS (the Anker S330's onboard AEC may suppress capture while
             # its speaker is playing).
             log.info(
-                f"Barge-in monitor: {chunks_read} chunks, max wake score {detector.max_score:.2f}",
+                f"Barge-in monitor: {chunks_read} chunks, max wake score "
+                f"{detector.max_score:.2f}, max amplitude {max_amplitude:.0f}",
                 extra={"event": "barge_in_stats", "chunks": chunks_read,
-                       "max_score": round(detector.max_score, 3)}
+                       "max_score": round(detector.max_score, 3),
+                       "max_amplitude": int(max_amplitude)}
             )
 
     monitor_thread = threading.Thread(target=monitor, daemon=True)
