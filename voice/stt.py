@@ -49,6 +49,12 @@ def is_hallucination(text: str) -> bool:
     if len(normalized) < 3:
         return True
 
+    # Repeated-token loops ("Okay. Okay. Okay. ...", "I'm sorry, I'm sorry,")
+    # are Whisper decoder pathologies on silence/echo tails, not real speech.
+    words = normalized.split()
+    if len(words) >= 6 and len(set(words)) <= 2:
+        return True
+
     return False
 
 
