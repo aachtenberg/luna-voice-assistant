@@ -1,5 +1,7 @@
 """Anthropic (Claude) LLM provider."""
 
+import inspect
+
 import anthropic
 from .base import LLMProvider, convert_tools_to_anthropic
 
@@ -11,6 +13,18 @@ class AnthropicProvider(LLMProvider):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
         self.tool_registry = tool_registry
+
+    def _invoke_tool(self, func_name: str, func_args: dict):
+        """Call a tool, stripping hallucinated kwargs the model may add."""
+        if func_name not in self.tool_registry:
+            return f"Unknown tool: {func_name}"
+        fn = self.tool_registry[func_name]
+        try:
+            return fn(**func_args)
+        except TypeError:
+            valid_params = set(inspect.signature(fn).parameters)
+            filtered = {k: v for k, v in func_args.items() if k in valid_params}
+            return fn(**filtered)
 
     def chat(self, user_message: str, system_prompt: str, tools: list, history: list = None) -> str:
         """Send a message to Claude and handle tool calls."""
@@ -28,16 +42,20 @@ class AnthropicProvider(LLMProvider):
         print(f"[Claude] Tools: {anthropic_tools}")
 
         max_iterations = 5
-        for _ in range(max_iterations):
+        for iteration in range(max_iterations):
+            # Last turn: drop tools so the model must answer from what it already has
+            kwargs = {
+                "model": self.model,
+                "max_tokens": 1024,
+                "system": full_prompt,
+                "messages": messages,
+            }
+            if iteration < max_iterations - 1 and anthropic_tools:
+                kwargs["tools"] = anthropic_tools
+                kwargs["tool_choice"] = {"type": "auto"}
+
             try:
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=1024,
-                    system=full_prompt,
-                    tools=anthropic_tools,
-                    tool_choice={"type": "auto"},
-                    messages=messages
-                )
+                response = self.client.messages.create(**kwargs)
                 print(f"[Claude] Stop reason: {response.stop_reason}")
                 print(f"[Claude] Content: {response.content}")
             except Exception as e:
@@ -60,12 +78,7 @@ class AnthropicProvider(LLMProvider):
                         func_args = block.input
 
                         print(f"[Claude] Tool call: {func_name}({func_args})")
-
-                        if func_name in self.tool_registry:
-                            result = self.tool_registry[func_name](**func_args)
-                        else:
-                            result = f"Unknown tool: {func_name}"
-
+                        result = self._invoke_tool(func_name, func_args)
                         print(f"[Claude] Tool result: {str(result)[:200]}...")
 
                         tool_results.append({

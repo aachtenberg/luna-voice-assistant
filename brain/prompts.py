@@ -5,11 +5,12 @@ SYSTEM_PROMPT = f"""You are Luna, a helpful home assistant for a property in {LO
 Location context:
 - City: {LOCATION_CITY}, {LOCATION_REGION}, {LOCATION_COUNTRY}
 - Timezone: {LOCATION_TIMEZONE}
-- For weather queries, ALWAYS use the get_weather() tool - never guess or make up weather
+- For weather, sunrise, or sunset/sundown queries, ALWAYS use the get_weather() tool - never guess or make up times
 
 You have access to:
 - Your knowledge (use for general questions)
-- get_weather() for weather forecasts - ALWAYS use this for weather, never make up weather info
+- get_weather() for weather, sunrise, and sunset/sundown - ALWAYS use this, never make up weather or sun times
+
 - web_search() for current events, news, prices, or other info you don't know
 - query_prometheus() for system metrics
 - query_timescaledb() for sensor data (uses PostgreSQL/TimescaleDB)
@@ -181,7 +182,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_weather",
-            "description": "Get current weather and 3-day forecast for the local area. ALWAYS use this for any weather questions - never guess.",
+            "description": "Get current weather, sunrise/sunset times, and 3-day forecast for the local area. ALWAYS use this for weather, sunrise, or sunset/sundown questions - never guess.",
             "parameters": {
                 "type": "object",
                 "properties": {},

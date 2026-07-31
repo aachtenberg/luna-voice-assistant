@@ -1,5 +1,6 @@
 """Groq LLM provider."""
 
+import inspect
 import json
 from groq import Groq
 from .base import LLMProvider, convert_tools_to_openai
@@ -12,6 +13,18 @@ class GroqProvider(LLMProvider):
         self.client = Groq(api_key=api_key)
         self.model = model
         self.tool_registry = tool_registry
+
+    def _invoke_tool(self, func_name: str, func_args: dict):
+        """Call a tool, stripping hallucinated kwargs the model may add."""
+        if func_name not in self.tool_registry:
+            return f"Unknown tool: {func_name}"
+        fn = self.tool_registry[func_name]
+        try:
+            return fn(**func_args)
+        except TypeError:
+            valid_params = set(inspect.signature(fn).parameters)
+            filtered = {k: v for k, v in func_args.items() if k in valid_params}
+            return fn(**filtered)
 
     def chat(self, user_message: str, system_prompt: str, tools: list, history: list = None) -> str:
         """Send a message to Groq and handle tool calls."""
@@ -26,15 +39,19 @@ class GroqProvider(LLMProvider):
         groq_tools = convert_tools_to_openai(tools)
 
         max_iterations = 5
-        for _ in range(max_iterations):
+        for iteration in range(max_iterations):
+            # Last turn: drop tools so the model must answer from what it already has
+            kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": 1024,
+            }
+            if iteration < max_iterations - 1 and groq_tools:
+                kwargs["tools"] = groq_tools
+                kwargs["tool_choice"] = "auto"
+
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    tools=groq_tools,
-                    tool_choice="auto",
-                    max_tokens=1024
-                )
+                response = self.client.chat.completions.create(**kwargs)
             except Exception as e:
                 print(f"Groq error: {e}")
                 raise  # propagate to FallbackProvider
@@ -71,12 +88,7 @@ class GroqProvider(LLMProvider):
                     func_args = {}
 
                 print(f"[Groq] Tool call: {func_name}({func_args})")
-
-                if func_name in self.tool_registry:
-                    result = self.tool_registry[func_name](**func_args)
-                else:
-                    result = f"Unknown tool: {func_name}"
-
+                result = self._invoke_tool(func_name, func_args)
                 print(f"[Groq] Tool result: {str(result)[:200]}...")
 
                 messages.append({

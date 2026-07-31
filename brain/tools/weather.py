@@ -18,6 +18,27 @@ WMO_CODES = {
 }
 
 
+def _spoken_clock(iso_dt: str) -> str:
+    """Format Open-Meteo ISO datetime for spoken replies (no AM/PM, no colons)."""
+    time_part = iso_dt.split("T", 1)[-1][:5]
+    hour, minute = (int(x) for x in time_part.split(":"))
+    if hour < 12:
+        period = "in the morning"
+        display = 12 if hour == 0 else hour
+    elif hour == 12:
+        period = "in the afternoon"
+        display = 12
+    elif hour < 17:
+        period = "in the afternoon"
+        display = hour - 12
+    else:
+        period = "in the evening"
+        display = hour - 12
+    if minute == 0:
+        return f"{display} {period}"
+    return f"{display} {minute} {period}"
+
+
 def get_weather() -> str:
     """Get current weather and forecast for the configured location using Open-Meteo API."""
     try:
@@ -27,7 +48,7 @@ def get_weather() -> str:
                 "latitude": LOCATION_LAT,
                 "longitude": LOCATION_LON,
                 "current": "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,wind_gusts_10m",
-                "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max",
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,sunrise,sunset",
                 "temperature_unit": "celsius",
                 "wind_speed_unit": "kmh",
                 "precipitation_unit": "mm",
@@ -63,6 +84,11 @@ def get_weather() -> str:
         if precip_mm > 0:
             result += f"- Precipitation: {precip_mm:.1f} mm\n"
 
+        # Today's sunrise/sunset up front for sundown questions
+        if daily.get("sunrise") and daily.get("sunset"):
+            result += f"- Sunrise today: {_spoken_clock(daily['sunrise'][0])}\n"
+            result += f"- Sunset today: {_spoken_clock(daily['sunset'][0])}\n"
+
         # Daily forecast
         if daily.get("time"):
             result += "\nForecast:\n"
@@ -77,6 +103,11 @@ def get_weather() -> str:
                 result += f"- {day_name}: {day_conditions}, high {high_c:.0f} degrees, low {low_c:.0f} degrees"
                 if precip_prob and precip_prob > 20:
                     result += f", {precip_prob}% chance of precipitation"
+                if daily.get("sunrise") and daily.get("sunset"):
+                    result += (
+                        f", sunrise {_spoken_clock(daily['sunrise'][i])}, "
+                        f"sunset {_spoken_clock(daily['sunset'][i])}"
+                    )
                 result += "\n"
 
         return result
