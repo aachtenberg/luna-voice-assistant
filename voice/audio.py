@@ -23,14 +23,20 @@ def resample(audio_data: np.ndarray, orig_rate: int, target_rate: int) -> np.nda
 
 
 class AudioRecorder:
-    def __init__(self):
+    def __init__(self, device=None):
         self.stream = None
         self.sample_rate = DEVICE_SAMPLE_RATE
-        # Use None = system default (PipeWire will route to the right device)
-        self.device_index = None
+        # None = system default (PipeWire will route to the right device);
+        # otherwise a sounddevice index or name substring
+        if isinstance(device, str) and device.isdigit():
+            device = int(device)
+        self.device_index = device
         self._reader_thread = None  # Track the last read_chunk daemon thread
         self._last_nonsilent_time = time.monotonic()
-        print("Using system default audio input (PipeWire managed)")
+        if device is None:
+            print("Using system default audio input (PipeWire managed)")
+        else:
+            print(f"Using audio input device: {device}")
 
     def open_stream(self, flush_buffer=False):
         """Open the microphone stream."""

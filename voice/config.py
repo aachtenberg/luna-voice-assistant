@@ -60,6 +60,11 @@ AUDIO_SETTLE_PAUSE = float(os.getenv("AUDIO_SETTLE_PAUSE", "0.2"))
 
 # Barge-in (interrupt TTS with wake word)
 BARGE_IN_ENABLED = os.getenv("BARGE_IN_ENABLED", "true").lower() == "true"
+# Separate mic to listen on during TTS (sounddevice name substring or index,
+# e.g. "USB PnP Sound Device"). The Anker S330's onboard AEC suppresses its own
+# mic while its speaker plays, so a second mic hears the wake word far better.
+# Empty = monitor on the main mic.
+BARGE_IN_DEVICE = os.getenv("BARGE_IN_DEVICE", "")
 
 # MQTT settings for timer notifications
 MQTT_BROKER = os.getenv("MQTT_BROKER", "192.168.0.167")

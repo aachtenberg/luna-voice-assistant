@@ -18,7 +18,7 @@ from config import (
     MQTT_BROKER, MQTT_PORT, TIMER_TOPIC, STREAMING_STT_ENABLED,
     COOLDOWN_SECONDS, CHUNK_DURATION, POST_TTS_PAUSE, POST_EMPTY_PAUSE,
     AUDIO_SETTLE_PAUSE, MAX_RECORD_SECONDS, FOLLOWUP_MAX_SECONDS,
-    MIN_SPEECH_BYTES, BARGE_IN_ENABLED
+    MIN_SPEECH_BYTES, BARGE_IN_ENABLED, BARGE_IN_DEVICE
 )
 from logging_config import setup_logging
 from metrics_server import start_metrics_server
@@ -87,10 +87,11 @@ def start_mqtt_listener():
     return client
 
 
-def _speak_with_barge_in(recorder, detector, token_iter, on_first_audio=None):
+def _speak_with_barge_in(recorder, barge_recorder, detector, token_iter, on_first_audio=None):
     """Run streamed TTS with concurrent wake word detection for barge-in.
 
-    Opens the mic during TTS playback and monitors for the wake word.
+    Opens barge_recorder's mic during TTS playback and monitors for the wake
+    word, falling back to the main recorder if it can't be opened.
     If detected, stops TTS immediately.
 
     Returns (response_text, barged_in).
@@ -102,12 +103,22 @@ def _speak_with_barge_in(recorder, detector, token_iter, on_first_audio=None):
         chunks_read = 0
         max_amplitude = 0.0
         debug_frames = []
+        mic = barge_recorder
         try:
-            recorder.open_stream(flush_buffer=True)
+            try:
+                mic.open_stream(flush_buffer=True)
+            except Exception as e:
+                if mic is recorder:
+                    raise
+                log.warning(f"Barge-in mic unavailable, using main mic: {e}",
+                            extra={"event": "barge_in_mic_fallback"})
+                mic.close_stream()
+                mic = recorder
+                mic.open_stream(flush_buffer=True)
             detector.max_score = 0.0
             while not stop_monitor.is_set():
                 try:
-                    chunk = recorder.read_chunk()
+                    chunk = mic.read_chunk()
                 except Exception:
                     break
                 chunks_read += 1
@@ -128,10 +139,12 @@ def _speak_with_barge_in(recorder, detector, token_iter, on_first_audio=None):
             # its speaker is playing).
             log.info(
                 f"Barge-in monitor: {chunks_read} chunks, max wake score "
-                f"{detector.max_score:.2f}, max amplitude {max_amplitude:.0f}",
+                f"{detector.max_score:.2f}, max amplitude {max_amplitude:.0f}, "
+                f"mic {mic.device_index or 'default'}",
                 extra={"event": "barge_in_stats", "chunks": chunks_read,
                        "max_score": round(detector.max_score, 3),
-                       "max_amplitude": int(max_amplitude)}
+                       "max_amplitude": int(max_amplitude),
+                       "mic": str(mic.device_index or "default")}
             )
             # Debug: keep the last barge-in window on disk for offline
             # analysis of what the detector actually hears during TTS.
@@ -153,7 +166,9 @@ def _speak_with_barge_in(recorder, detector, token_iter, on_first_audio=None):
     response = speak_streamed(token_iter, on_first_audio=on_first_audio, mute_mic=False)
 
     stop_monitor.set()
-    recorder.close_stream()  # Waits for reader thread, then closes stream
+    # Waits for reader thread, then closes stream (no-op if never opened)
+    barge_recorder.close_stream()
+    recorder.close_stream()
     monitor_thread.join(timeout=5.0)
     if monitor_thread.is_alive():
         log.warning("Barge-in monitor thread did not exit cleanly", extra={"event": "barge_in_hangup"})
@@ -170,6 +185,7 @@ def main():
     log.info("Metrics server started on port 8001", extra={"event": "metrics_started"})
 
     recorder = AudioRecorder()
+    barge_recorder = AudioRecorder(device=BARGE_IN_DEVICE) if BARGE_IN_DEVICE else recorder
     detector = WakeWordDetector()
     cooldown_remaining = 0  # Chunks to skip before accepting wake word
     pending_conversation = False  # True after barge-in: skip wake word, enter conversation
@@ -333,7 +349,7 @@ def main():
 
             if BARGE_IN_ENABLED:
                 response, barged_in = _speak_with_barge_in(
-                    recorder, detector,
+                    recorder, barge_recorder, detector,
                     ask_stream(text),
                     on_first_audio=stop_thinking_loop
                 )
@@ -401,7 +417,7 @@ def main():
 
                             if BARGE_IN_ENABLED:
                                 followup_response, barged_in = _speak_with_barge_in(
-                                    recorder, detector,
+                                    recorder, barge_recorder, detector,
                                     ask_stream(followup_text),
                                     on_first_audio=stop_thinking_loop
                                 )
