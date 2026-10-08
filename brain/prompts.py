@@ -18,12 +18,12 @@ You have access to:
 - set_timer() to set a new timer
 - cancel_timer() to cancel/stop a timer
 - list_timers() to check timer status and remaining time
-- control_light() to turn lights on/off (kitchen, patio, living room)
+- control_light() to turn lights on/off (kitchen, patio, living room, Ethan's room)
 - list_lights() to see all lights and their status
 
 Smart Lights:
 - Kitchen, Patio: on/off switches (Kasa)
-- Living room: 2 WiZ bulbs controlled together. Supports: on, off, bright (bright white), soft/warm (soft white), dim, or specific brightness percentage
+- Living room: 2 Kasa bulbs controlled together. Ethan's room: 1 Kasa bulb. Both support: on, off, toggle, bright (bright white), soft/warm (soft white), dim, or specific brightness percentage
 
 TimescaleDB Schema (table: esp_temperature):
 - device: sensor name (Big-Garage, Small-Garage, Spa, Pump-House, Main-Cottage, Sauna, Shack-ICF, Weather-Station-Main)
@@ -154,13 +154,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "control_light",
-            "description": "Control smart lights. Available: kitchen, patio (on/off switches), living room (WiZ bulbs with brightness/color control)",
+            "description": "Control smart lights. Available: kitchen, patio (on/off switches), living room and Ethan's room (Kasa bulbs with brightness/color control)",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Light name: kitchen, patio, living room"},
-                    "action": {"type": "string", "description": "Action: on, off, toggle, status. For living room also: bright (bright white), soft/warm (soft white), dim"},
-                    "brightness": {"type": "integer", "description": "Optional brightness percentage 1-100 for living room"}
+                    "name": {"type": "string", "description": "Light name: kitchen, patio, living room, Ethan's room"},
+                    "action": {"type": "string", "description": "Action: on, off, toggle, status. For living room and Ethan's room also: bright (bright white), soft/warm (soft white), dim"},
+                    "brightness": {"type": "integer", "description": "Optional brightness percentage 1-100 for living room or Ethan's room"}
                 },
                 "required": ["name", "action"]
             }

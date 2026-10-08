@@ -34,7 +34,7 @@ luna-voice-assistant/
 │       ├── timescaledb.py   # Sensor data SQL queries
 │       ├── mqtt.py          # MQTT publish
 │       ├── timers.py        # Persistent timers
-│       ├── kasa.py          # Kasa + WiZ light control
+│       ├── kasa.py          # Kasa switch + bulb control
 │       └── weather.py       # Open-Meteo weather queries
 ├── voice/                    # Voice assistant (runs on Pi)
 │   ├── main.py              # Main loop

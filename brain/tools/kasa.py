@@ -1,8 +1,7 @@
-"""Smart light control - Kasa switches and WiZ bulbs."""
+"""Smart light control - Kasa switches and Kasa bulbs."""
 
 import asyncio
-from kasa import Discover
-from pywizlight import wizlight, PilotBuilder
+from kasa import Discover, Module
 
 # Kasa switches
 KASA_DEVICES = {
@@ -12,11 +11,25 @@ KASA_DEVICES = {
     "patio light": "192.168.0.179",
 }
 
-# WiZ bulbs - living room is a group of 2 bulbs
-WIZ_DEVICES = {
-    "living room": ["192.168.0.132", "192.168.0.129"],
-    "living room lights": ["192.168.0.132", "192.168.0.129"],
+# Kasa KL125 bulbs, grouped by room. A room's bulbs are controlled together.
+# These need "Third-Party Compatibility" on in the Kasa app: with it off, the
+# firmware closes the unauthenticated port 9999 protocol and wants a KLAP login
+# that python-kasa cannot complete for these bulbs.
+KASA_BULBS = {
+    "living room": ["192.168.0.10", "192.168.0.2"],
+    "ethan's room": ["192.168.0.59"],
 }
+
+# Spoken / LLM name variants -> room key in KASA_BULBS
+BULB_ALIASES = {
+    "living room lights": "living room",
+    "ethans room": "ethan's room",
+    "ethan room": "ethan's room",
+    "ethan's bedroom": "ethan's room",
+    "ethan": "ethan's room",
+}
+
+BULB_ACTIONS = ("on", "off", "status", "bright", "warm", "soft", "dim")
 
 
 def _run_async(coro):
@@ -62,40 +75,56 @@ async def _control_device(ip: str, action: str) -> str:
         return f"Error controlling device: {e}"
 
 
-async def _control_wiz_bulbs(ips: list, action: str, brightness: int = None) -> str:
-    """Control WiZ bulbs."""
-    results = []
-    for ip in ips:
-        try:
-            bulb = wizlight(ip)
-            if action == "on":
-                if brightness is not None:
-                    await bulb.turn_on(PilotBuilder(brightness=brightness))
-                else:
-                    await bulb.turn_on()
-                results.append("on")
-            elif action == "off":
-                await bulb.turn_off()
-                results.append("off")
-            elif action == "status":
-                state = await bulb.updateState()
-                if state and state.get_state():
-                    bri = int((state.get_brightness() or 0) / 255 * 100)
-                    results.append(f"on ({bri}%)")
-                else:
-                    results.append("off")
-            elif action == "bright":
-                await bulb.turn_on(PilotBuilder(brightness=255, colortemp=6500))
-                results.append("bright white")
-            elif action in ("warm", "soft"):
-                await bulb.turn_on(PilotBuilder(brightness=200, colortemp=2700))
-                results.append("soft white")
-            elif action == "dim":
-                await bulb.turn_on(PilotBuilder(brightness=50))
-                results.append("dim")
-        except Exception as e:
-            results.append(f"error: {e}")
-    return ", ".join(results)
+async def _control_bulb(ip: str, action: str, brightness: int = None) -> str:
+    """Control one Kasa bulb. Setting brightness or color temp also turns it on."""
+    try:
+        dev = await Discover.discover_single(ip, timeout=5)
+        await dev.update()
+        light = dev.modules[Module.Light]
+
+        if action == "on":
+            if brightness is not None:
+                await light.set_brightness(brightness)
+            else:
+                await dev.turn_on()
+            return "on"
+        elif action == "off":
+            await dev.turn_off()
+            return "off"
+        elif action == "status":
+            return f"on ({light.brightness}%)" if dev.is_on else "off"
+        elif action == "bright":
+            await light.set_color_temp(6500)
+            await light.set_brightness(100)
+            return "bright white"
+        elif action in ("warm", "soft"):
+            await light.set_color_temp(2700)
+            await light.set_brightness(80)
+            return "soft white"
+        elif action == "dim":
+            await light.set_brightness(20)
+            return "dim"
+        return f"unknown action {action}"
+    except Exception as e:
+        return f"error: {e}"
+
+
+async def _control_bulbs(ips: list, action: str, brightness: int = None) -> list:
+    return await asyncio.gather(*(_control_bulb(ip, action, brightness) for ip in ips))
+
+
+def _find_room(name_lower: str):
+    """Match a light name to a KASA_BULBS room, or None."""
+    room = BULB_ALIASES.get(name_lower, name_lower)
+    if room in KASA_BULBS:
+        return room
+    for alias, target in BULB_ALIASES.items():
+        if alias in name_lower:
+            return target
+    for room in KASA_BULBS:
+        if room in name_lower or name_lower in room:
+            return room
+    return None
 
 
 def control_light(name: str, action: str, brightness: int = None) -> str:
@@ -103,9 +132,9 @@ def control_light(name: str, action: str, brightness: int = None) -> str:
     Control a smart light.
 
     Args:
-        name: Name of the light (e.g., "kitchen", "patio", "living room")
+        name: Name of the light (e.g., "kitchen", "patio", "living room", "ethan's room")
         action: Action to perform ("on", "off", "toggle", "status", "bright", "warm", "dim")
-        brightness: Optional brightness percentage (1-100) for WiZ bulbs
+        brightness: Optional brightness percentage (1-100) for bulbs
 
     Returns:
         Result message
@@ -113,42 +142,41 @@ def control_light(name: str, action: str, brightness: int = None) -> str:
     name_lower = name.lower().strip()
     action_lower = action.lower().strip()
 
-    # Check if it's a WiZ device (living room)
-    wiz_ips = None
-    for device_name, device_ips in WIZ_DEVICES.items():
-        if name_lower in device_name or device_name in name_lower:
-            wiz_ips = device_ips
-            break
+    room = _find_room(name_lower)
+    if room:
+        label = room[0].upper() + room[1:] + " lights"
+        if action_lower == "toggle":
+            states = _run_async(_control_bulbs(KASA_BULBS[room], "status"))
+            action_lower = "off" if any(s.startswith("on") for s in states) else "on"
+        if action_lower not in BULB_ACTIONS:
+            return f"Unknown action '{action}'. Use: on, off, toggle, status, bright, warm/soft, dim"
 
-    if wiz_ips:
-        # Handle WiZ bulbs
-        if action_lower not in ("on", "off", "status", "bright", "warm", "soft", "dim"):
-            return f"Unknown action '{action}'. Use: on, off, status, bright, warm/soft, dim"
-
-        # Convert brightness percentage to 0-255
-        bri_value = None
+        bri = None
         if brightness is not None:
-            bri_value = int(int(brightness) * 255 / 100)
-            bri_value = max(1, min(255, bri_value))
+            bri = max(1, min(100, int(brightness)))
 
-        result = _run_async(_control_wiz_bulbs(wiz_ips, action_lower, bri_value))
+        results = _run_async(_control_bulbs(KASA_BULBS[room], action_lower, bri))
+        errors = [r for r in results if r.startswith("error")]
+        if errors and len(errors) == len(results):
+            return f"Couldn't reach the {room} lights: {errors[0]}"
 
         if action_lower == "on":
-            if brightness is not None:
-                return f"Living room lights set to {brightness}%"
-            return "Living room lights turned on"
+            msg = f"{label} set to {bri}%" if bri is not None else f"{label} turned on"
         elif action_lower == "off":
-            return "Living room lights turned off"
+            msg = f"{label} turned off"
         elif action_lower == "bright":
-            return "Living room lights set to bright white"
+            msg = f"{label} set to bright white"
         elif action_lower in ("warm", "soft"):
-            return "Living room lights set to soft white"
+            msg = f"{label} set to soft white"
         elif action_lower == "dim":
-            return "Living room lights dimmed"
+            msg = f"{label} dimmed"
         else:
-            return f"Living room lights: {result}"
+            msg = f"{label}: {', '.join(results)}"
+        if errors:
+            msg += f" ({len(errors)} of {len(results)} bulbs didn't respond)"
+        return msg
 
-    # Check if it's a Kasa device
+    # Check if it's a Kasa switch
     ip = KASA_DEVICES.get(name_lower)
     if not ip:
         for device_name, device_ip in KASA_DEVICES.items():
@@ -157,7 +185,7 @@ def control_light(name: str, action: str, brightness: int = None) -> str:
                 break
 
     if not ip:
-        return f"Unknown light '{name}'. Available: kitchen, patio, living room"
+        return f"Unknown light '{name}'. Available: kitchen, patio, living room, Ethan's room"
 
     if action_lower not in ("on", "off", "toggle", "status"):
         return f"Unknown action '{action}'. Use: on, off, toggle, or status"
@@ -189,22 +217,11 @@ def list_lights() -> str:
             except Exception as e:
                 results.append(f"{name}: error")
 
-        # WiZ bulbs (living room)
-        wiz_status = []
-        for ip in WIZ_DEVICES.get("living room", []):
-            try:
-                bulb = wizlight(ip)
-                state = await bulb.updateState()
-                if state and state.get_state():
-                    bri = int((state.get_brightness() or 0) / 255 * 100)
-                    wiz_status.append(f"on ({bri}%)")
-                else:
-                    wiz_status.append("off")
-            except:
-                wiz_status.append("error")
-
-        if wiz_status:
-            results.append(f"Living room: {', '.join(wiz_status)}")
+        # Kasa bulbs, by room
+        for room, ips in KASA_BULBS.items():
+            states = await _control_bulbs(ips, "status")
+            states = ["error" if s.startswith("error") else s for s in states]
+            results.append(f"{room[0].upper() + room[1:]}: {', '.join(states)}")
 
         return ". ".join(results)
 
