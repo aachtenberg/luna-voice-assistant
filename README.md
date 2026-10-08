@@ -440,6 +440,8 @@ To add Tuya devices, you need to extract local keys via Tuya IoT platform - not 
 │   ├── server.py            # Aggregates systemd + /metrics → /api/status (:8090)
 │   ├── launch-kiosk.sh      # Chromium kiosk launcher (Wayland/labwc)
 │   ├── luna-status-dashboard.service  # Systemd unit for the HTTP server
+│   ├── kiosk-watchdog.py    # Relaunches Chromium if the kiosk renders blank white
+│   ├── kiosk-watchdog.{service,timer}  # systemd --user units for the watchdog
 │   └── labwc-autostart.example        # Example kiosk autostart entry
 ├── docs/
 │   └── k3s-deploy.md        # Build/deploy runbook for k3s
@@ -509,6 +511,18 @@ to your labwc autostart — see `status-dashboard/labwc-autostart.example` (note
 copy the system file first and append the kiosk line). To test the kiosk manually:
 ```
 status-dashboard/launch-kiosk.sh
+```
+
+Chromium on the Pi can come up alive but painting only white, which `lwrespawn`
+cannot see because nothing exits. `kiosk-watchdog.py` screenshots the display
+every 2 minutes (`grim`) and, if it is white twice in a row, terminates the
+kiosk browser so `lwrespawn` relaunches it. Install it as a user timer:
+```
+mkdir -p ~/.config/systemd/user
+cp status-dashboard/kiosk-watchdog.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now kiosk-watchdog.timer
+journalctl --user -u kiosk-watchdog.service   # restarts are logged here
 ```
 
 # License

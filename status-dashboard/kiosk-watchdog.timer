@@ -1,0 +1,9 @@
+[Unit]
+Description=Check the Luna kiosk display for a blank white page every 2 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
