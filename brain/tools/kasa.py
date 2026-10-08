@@ -1,7 +1,15 @@
 """Smart light control - Kasa switches and Kasa bulbs."""
 
 import asyncio
-from kasa import Discover, Module
+from kasa import (
+    Device,
+    DeviceConfig,
+    DeviceConnectionParameters,
+    DeviceEncryptionType,
+    DeviceFamily,
+    Discover,
+    Module,
+)
 
 # Kasa switches
 KASA_DEVICES = {
@@ -30,6 +38,15 @@ BULB_ALIASES = {
 }
 
 BULB_ACTIONS = ("on", "off", "status", "bright", "warm", "soft", "dim")
+
+# Connect to bulbs directly over the legacy XOR protocol (TCP 9999) rather than
+# via discover_single. The bulbs answer discovery on both 9999 (XOR) and 20002
+# (KLAP), and whichever reply lands first picks the transport; when KLAP wins,
+# the login fails. From the cluster that race was lost often enough to matter.
+# Skipping UDP discovery also removes a lossy hop for weak-signal bulbs.
+BULB_CONNECTION = DeviceConnectionParameters(
+    DeviceFamily.IotSmartBulb, DeviceEncryptionType.Xor
+)
 
 
 def _run_async(coro):
@@ -77,9 +94,11 @@ async def _control_device(ip: str, action: str) -> str:
 
 async def _control_bulb(ip: str, action: str, brightness: int = None) -> str:
     """Control one Kasa bulb. Setting brightness or color temp also turns it on."""
+    dev = None
     try:
-        dev = await Discover.discover_single(ip, timeout=5)
-        await dev.update()
+        dev = await Device.connect(
+            config=DeviceConfig(host=ip, timeout=5, connection_type=BULB_CONNECTION)
+        )
         light = dev.modules[Module.Light]
 
         if action == "on":
@@ -107,6 +126,9 @@ async def _control_bulb(ip: str, action: str, brightness: int = None) -> str:
         return f"unknown action {action}"
     except Exception as e:
         return f"error: {e}"
+    finally:
+        if dev is not None:
+            await dev.disconnect()
 
 
 async def _control_bulbs(ips: list, action: str, brightness: int = None) -> list:
