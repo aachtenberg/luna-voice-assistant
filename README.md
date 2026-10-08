@@ -9,7 +9,7 @@ Self-hosted voice assistant replacing Alexa with local/cloud LLMs, smart home co
 - **LLM backends** - Anthropic Claude, Ollama (local), or Groq — single provider or an automatic fallback chain
 - **Runtime LLM switching** - swap provider/model live via the brain's `/admin/provider` API (no restart; persists across restarts)
 - **Text-to-speech** - Piper TTS (local, fast)
-- **Smart home control** - Kasa switches, WiZ bulbs
+- **Smart home control** - Kasa switches and bulbs
 - **Tools** - Web search (SearXNG), weather (Open-Meteo), sensor data (TimescaleDB), timers
 - **Follow-up conversations** - Listens after asking questions without wake word
 - **Observability** - Prometheus metrics, structured JSON logging
@@ -84,7 +84,8 @@ Self-hosted voice assistant replacing Alexa with local/cloud LLMs, smart home co
 |--------|-------|----------|
 | Kitchen switch | TP-Link Kasa HS200 | Kasa (works) |
 | Patio switch | TP-Link Kasa HS200 | Kasa (works) |
-| Living room bulbs | WiZ A19 (x2) | WiZ (works) |
+| Living room bulbs | TP-Link Kasa KL125 (x2) | Kasa (works) |
+| Ethan's room bulb | TP-Link Kasa KL125 | Kasa (works) |
 
 **Note:** Tuya-based devices (Geeni, Amazon Basics) require cloud key extraction and are not straightforward to set up.
 
@@ -228,15 +229,21 @@ LOG_FORMAT=text
 
 ### 3. Configure smart devices
 
-Edit `brain/tools/kasa.py` with your device IPs. Right now the Kasa and WiZ device mappings are code-based, not environment-driven:
+Edit `brain/tools/kasa.py` with your device IPs. Right now the Kasa device mappings are code-based, not environment-driven. Switches are on/off; bulbs are grouped by room and also take brightness and white temperature. Give every device a DHCP reservation, since the map is by IP:
 ```python
 KASA_DEVICES = {
     "kitchen": "192.168.x.x",
     "patio": "192.168.x.x",
 }
 
-WIZ_DEVICES = {
+KASA_BULBS = {
     "living room": ["192.168.x.x", "192.168.x.x"],  # Multiple bulbs as group
+    "ethan's room": ["192.168.x.x"],
+}
+
+# Extra spoken names for a room
+BULB_ALIASES = {
+    "ethans room": "ethan's room",
 }
 ```
 
@@ -283,6 +290,8 @@ Say "Hey Luna" followed by your command:
 
 - "Hey Luna, turn on the kitchen light"
 - "Hey Luna, set living room to 50%"
+- "Hey Luna, turn on Ethan's room"
+- "Hey Luna, make the living room warm"
 - "Hey Luna, what's the temperature in the garage?"
 - "Hey Luna, set a timer for 5 minutes"
 - "Hey Luna, what's the weather?"
@@ -355,10 +364,10 @@ asyncio.run(test())
 "
 ```
 
-**WiZ bulbs timeout:**
-- WiZ bulbs use UDP port 38899
-- Ensure firewall allows UDP traffic on local network
-- Bulbs must be on same subnet as Pi
+**Kasa bulbs fail to authenticate ("Device response did not match our challenge"):**
+- Newer KL125 firmware closes the unauthenticated port 9999 protocol and wants a KLAP login that python-kasa cannot complete for these bulbs
+- Turn on **Third-Party Compatibility** in the Kasa app; that reopens port 9999 and no credentials are needed
+- Give the bulbs DHCP reservations: the device map is by IP
 
 ### LLM Issues
 
@@ -402,7 +411,7 @@ asyncio.run(test())
 |------------|----------|-----------|
 | TP-Link Kasa switches | Kasa | ✅ |
 | TP-Link Kasa plugs | Kasa | ✅ |
-| WiZ bulbs | WiZ | ✅ |
+| TP-Link Kasa bulbs (KL125) | Kasa | ✅ (Third-Party Compatibility on) |
 | Tuya/Geeni/Amazon Basics | Tuya | ❌ (needs cloud key) |
 
 To add Tuya devices, you need to extract local keys via Tuya IoT platform - not straightforward.
@@ -422,7 +431,7 @@ To add Tuya devices, you need to extract local keys via Tuya IoT platform - not 
 │   │   ├── groq.py          # Groq cloud
 │   │   └── fallback.py      # FallbackProvider chain
 │   ├── tools/               # Tool implementations
-│   │   ├── kasa.py          # Smart lights (Kasa + WiZ)
+│   │   ├── kasa.py          # Smart lights (Kasa switches + bulbs)
 │   │   ├── timers.py        # Timer functionality
 │   │   ├── web_search.py    # SearXNG
 │   │   ├── timescaledb.py   # Sensor data
