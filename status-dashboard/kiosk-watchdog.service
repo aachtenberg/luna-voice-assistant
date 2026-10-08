@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart the Luna kiosk Chromium if it is rendering blank white
+
+[Service]
+Type=oneshot
+ExecStart=%h/luna-voice-assistant/status-dashboard/kiosk-watchdog.py
