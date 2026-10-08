@@ -147,13 +147,18 @@ def control_light(name: str, action: str, brightness: int = None) -> str:
         label = room[0].upper() + room[1:] + " lights"
         if action_lower == "toggle":
             states = _run_async(_control_bulbs(KASA_BULBS[room], "status"))
+            if all(s.startswith("error") for s in states):
+                return f"Couldn't reach the {room} lights: {states[0]}"
             action_lower = "off" if any(s.startswith("on") for s in states) else "on"
         if action_lower not in BULB_ACTIONS:
             return f"Unknown action '{action}'. Use: on, off, toggle, status, bright, warm/soft, dim"
 
         bri = None
         if brightness is not None:
-            bri = max(1, min(100, int(brightness)))
+            try:
+                bri = max(1, min(100, int(str(brightness).strip().rstrip("%"))))
+            except (TypeError, ValueError):
+                return f"Invalid brightness '{brightness}'. Use a number from 1 to 100"
 
         results = _run_async(_control_bulbs(KASA_BULBS[room], action_lower, bri))
         errors = [r for r in results if r.startswith("error")]
