@@ -229,7 +229,7 @@ LOG_FORMAT=text
 
 ### 3. Configure smart devices
 
-Edit `brain/tools/kasa.py` with your device IPs. Right now the Kasa device mappings are code-based, not environment-driven:
+Edit `brain/tools/kasa.py` with your device IPs. Right now the Kasa device mappings are code-based, not environment-driven. Switches are on/off; bulbs are grouped by room and also take brightness and white temperature. Give every device a DHCP reservation, since the map is by IP:
 ```python
 KASA_DEVICES = {
     "kitchen": "192.168.x.x",
@@ -238,6 +238,12 @@ KASA_DEVICES = {
 
 KASA_BULBS = {
     "living room": ["192.168.x.x", "192.168.x.x"],  # Multiple bulbs as group
+    "ethan's room": ["192.168.x.x"],
+}
+
+# Extra spoken names for a room
+BULB_ALIASES = {
+    "ethans room": "ethan's room",
 }
 ```
 
@@ -284,6 +290,8 @@ Say "Hey Luna" followed by your command:
 
 - "Hey Luna, turn on the kitchen light"
 - "Hey Luna, set living room to 50%"
+- "Hey Luna, turn on Ethan's room"
+- "Hey Luna, make the living room warm"
 - "Hey Luna, what's the temperature in the garage?"
 - "Hey Luna, set a timer for 5 minutes"
 - "Hey Luna, what's the weather?"
