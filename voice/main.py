@@ -15,7 +15,7 @@ from stt import transcribe, transcribe_streaming
 from tts import speak, speak_streamed, stop_speaking, announce_timer, start_thinking_loop, stop_thinking_loop
 from brain_client import ask, ask_stream
 from config import (
-    MQTT_BROKER, MQTT_PORT, TIMER_TOPIC, STREAMING_STT_ENABLED,
+    MQTT_BROKER, MQTT_PORT, TIMER_TOPIC, STOP_TOPIC, STREAMING_STT_ENABLED,
     COOLDOWN_SECONDS, CHUNK_DURATION, POST_TTS_PAUSE, POST_EMPTY_PAUSE,
     AUDIO_SETTLE_PAUSE, MAX_RECORD_SECONDS, FOLLOWUP_MAX_SECONDS,
     MIN_SPEECH_BYTES, BARGE_IN_ENABLED, BARGE_IN_DEVICE
@@ -43,6 +43,20 @@ COOLDOWN_CHUNKS = int(COOLDOWN_SECONDS / CHUNK_DURATION)
 timer_announcements = []
 timer_lock = threading.Lock()
 
+# Set by request_stop(); cleared at each conversation start
+stop_requested = threading.Event()
+
+
+def request_stop(source: str):
+    """Cut Luna off mid-answer without the wake word (kiosk button, MQTT, curl).
+
+    Stops TTS and makes the main loop skip follow-up listening, so she goes
+    straight back to waiting for the wake word.
+    """
+    log.info(f"Stop requested via {source}", extra={"event": "stop_requested", "source": source})
+    stop_requested.set()
+    stop_speaking()
+
 
 def on_mqtt_message(client, userdata, msg):
     """Handle incoming MQTT messages for timer notifications."""
@@ -63,8 +77,8 @@ def on_mqtt_connect(client, userdata, flags, reason_code, properties):
     than once at startup.
     """
     if reason_code == 0:
-        client.subscribe(TIMER_TOPIC)
-        log.info(f"Subscribed to MQTT topic: {TIMER_TOPIC}", extra={"event": "mqtt_connected"})
+        client.subscribe([(TIMER_TOPIC, 0), (STOP_TOPIC, 0)])
+        log.info(f"Subscribed to MQTT topics: {TIMER_TOPIC}, {STOP_TOPIC}", extra={"event": "mqtt_connected"})
     else:
         log.error(f"MQTT connect refused: {reason_code}", extra={"event": "mqtt_error"})
 
@@ -81,6 +95,7 @@ def start_mqtt_listener():
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.on_connect = on_mqtt_connect
     client.on_message = on_mqtt_message
+    client.message_callback_add(STOP_TOPIC, lambda c, u, msg: request_stop("mqtt"))
     client.reconnect_delay_set(min_delay=1, max_delay=60)
     client.connect_async(MQTT_BROKER, MQTT_PORT, 60)
     client.loop_start()
@@ -181,7 +196,7 @@ def main():
     log.info("Starting voice assistant", extra={"event": "startup"})
 
     # Start metrics server on port 8001 (non-blocking background thread)
-    metrics_server = start_metrics_server(port=8001)
+    metrics_server = start_metrics_server(port=8001, on_stop=lambda: request_stop("http"))
     log.info("Metrics server started on port 8001", extra={"event": "metrics_started"})
 
     recorder = AudioRecorder()
@@ -266,6 +281,7 @@ def main():
 
             # === Conversation start ===
             pending_conversation = False
+            stop_requested.clear()
             conversation_start = time.time()
             WAKEWORD_DETECTIONS.inc()
             LISTENING_STATE.set(0)
@@ -381,8 +397,13 @@ def main():
                 pending_conversation = True
                 continue
 
+            # Stopped via button/MQTT: no follow-up, straight back to wake word
+            stopped = stop_requested.is_set()
+            if stopped:
+                log.info("Stopped by request", extra={"event": "stopped"})
+
             # Check if response ends with a question - if so, listen for follow-up
-            expects_followup = response.strip().endswith("?")
+            expects_followup = not stopped and response.strip().endswith("?")
 
             if expects_followup:
                 log.info("Waiting for follow-up", extra={"event": "followup_listening"})

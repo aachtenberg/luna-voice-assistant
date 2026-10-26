@@ -1,4 +1,4 @@
-"""Background HTTP server for Prometheus metrics."""
+"""Background HTTP server for Prometheus metrics (and POST /stop)."""
 
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -27,14 +27,30 @@ class MetricsHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def do_POST(self):
+        on_stop = getattr(self.server, "on_stop", None)
+        if self.path == "/stop" and on_stop:
+            on_stop()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status": "stopped"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def log_message(self, format, *args):
         # Suppress default logging
         pass
 
 
-def start_metrics_server(port: int = METRICS_PORT):
-    """Start metrics HTTP server in background thread."""
+def start_metrics_server(port: int = METRICS_PORT, on_stop=None):
+    """Start metrics HTTP server in background thread.
+
+    on_stop: called on POST /stop (cuts off TTS without the wake word).
+    """
     server = HTTPServer(("0.0.0.0", port), MetricsHandler)
+    server.on_stop = on_stop
 
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

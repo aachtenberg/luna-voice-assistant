@@ -16,6 +16,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 DASH_PORT = 8090
 METRICS_URL = "http://localhost:8001/metrics"
+STOP_URL = "http://localhost:8001/stop"
 SERVICE = "luna-voice.service"
 
 
@@ -129,6 +130,25 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def do_POST(self):
+        # Stop button: forward to the voice service, which cuts off TTS
+        if self.path != "/api/stop":
+            self.send_response(404)
+            self.end_headers()
+            return
+        try:
+            req = urllib.request.Request(STOP_URL, method="POST")
+            with urllib.request.urlopen(req, timeout=3) as r:
+                ok = r.status == 200
+        except Exception:
+            ok = False
+        body = json.dumps({"stopped": ok}).encode()
+        self.send_response(200 if ok else 502)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *args):
         pass
 
@@ -180,6 +200,15 @@ PAGE = r"""<!DOCTYPE html>
   .stat .v { font-size:5.4vmin; font-weight:700; line-height:1; }
   .stat .k { font-size:2.1vmin; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; margin-top:1.1vmin; }
   .err .v { color:#ff6b6b; }
+  /* Touchscreen stop: only shown while Luna is busy (recording/thinking/speaking) */
+  .stop {
+    display:none; border:0; border-radius:6vmin; padding:3vmin 14vmin;
+    background:#b3303c; color:#fff; font:inherit; font-size:6vmin; font-weight:700;
+    letter-spacing:.08em; text-transform:uppercase; cursor:none; touch-action:manipulation;
+    box-shadow:0 0 5vmin #b3303c66;
+  }
+  .stop:active { transform:scale(.96); background:#8f2530; }
+  .processing .stop { display:block; }
   .stale { position:fixed; top:2vmin; right:2.5vmin; font-size:1.8vmin; color:#ff6b6b; opacity:0; transition:opacity .3s; }
   .stale.on { opacity:1; }
   .title { position:fixed; top:2vmin; left:2.5vmin; font-size:1.9vmin; color:var(--muted); letter-spacing:.2em; text-transform:uppercase; }
@@ -191,6 +220,7 @@ PAGE = r"""<!DOCTYPE html>
   <div class="orb"><div class="core"></div></div>
   <div class="label" id="label">Connecting…</div>
   <div class="sub" id="sub">&nbsp;</div>
+  <button class="stop" id="stop">Stop</button>
   <div class="stats" id="stats"></div>
 
 <script>
@@ -236,6 +266,10 @@ async function tick(){
     document.getElementById("stale").classList.add("on");
   }
 }
+document.getElementById("stop").addEventListener("click", async () => {
+  try { await fetch("/api/stop", {method:"POST"}); } catch(e) {}
+  tick();
+});
 tick();
 setInterval(tick, 1500);
 </script>

@@ -217,7 +217,20 @@ WAKEWORD_THRESHOLD=0.5
 VAD_THRESHOLD=0.0
 STREAMING_STT_ENABLED=true
 BARGE_IN_ENABLED=true
+BARGE_IN_DEVICE=luna_barge
 ```
+
+## Barge-in and Stop
+
+- **Barge-in mic**: `BARGE_IN_DEVICE=luna_barge` is the second USB mic (USB PnP)
+  run through PipeWire WebRTC echo cancellation, with the speaker's monitor as
+  the reference. Raw, that mic hears Luna 5–25× louder than the user, so the
+  wake word never scores. Set it up on the voice host with
+  `voice/setup-echo-cancel.sh` (writes `~/.config/pipewire/pipewire.conf.d/luna-echo-cancel.conf`
+  + `~/.asoundrc`, lowers the mic gain, turns its AGC off). Each
+  `Barge-in monitor: ... max wake score` log line shows how close detection came.
+- **Stop without the wake word**: the kiosk's Stop button, `curl -X POST http://<voice-host>:8001/stop`,
+  or any MQTT message on `voice-assistant/stop` cuts TTS and returns to wake-word listening.
 
 ## Location Context
 
