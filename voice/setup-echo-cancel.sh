@@ -34,10 +34,14 @@ context.modules = [
       monitor.mode = true
       audio.channels = 1
       audio.position = [ MONO ]
+      # These streams exist before WirePlumber has brought up the USB devices.
+      # dont-fallback alone makes WirePlumber destroy a stream whose target is
+      # missing, which unloads the whole module; linger makes it wait instead.
       capture.props = {
         node.name = "luna_ec_capture"
         target.object = "$MIC_NODE"
         node.dont-fallback = true
+        node.linger = true
       }
       source.props = {
         node.name = "luna_ec_source"
@@ -46,6 +50,7 @@ context.modules = [
       }
       sink.props = {
         node.name = "luna_ec_reference"
+        node.linger = true
       }
       aec.args = {
         webrtc.gain_control = false
@@ -83,15 +88,21 @@ print(ec["id"] if ec else "-", mic["id"] if mic else "-",
 ' "$MIC_NODE"
 }
 
-for i in $(seq 1 10); do
+for i in $(seq 1 20); do
     ids=$(lookup 2>/dev/null) || ids="- - -"
     read -r ec_id mic_id mic_card <<< "$ids"
     [ "$ec_id" != "-" ] && [ "$mic_id" != "-" ] && break
     sleep 1
 done
 
-if [ "$ec_id" = "-" ] || [ "$mic_id" = "-" ]; then
-    echo "ERROR: luna_ec_source or $MIC_NODE missing; check 'journalctl --user -u pipewire'" >&2
+if [ "$mic_id" = "-" ]; then
+    echo "ERROR: mic $MIC_NODE not found (plugged in? set LUNA_EC_MIC to its node.name)" >&2
+    exit 1
+fi
+if [ "$ec_id" = "-" ]; then
+    # The module unloads itself (logging only at info level) if a stream drops
+    echo "ERROR: luna_ec_source missing; echo-cancel module not loaded or unloaded itself." >&2
+    echo "Debug: PIPEWIRE_DEBUG=3 pipewire  (after: systemctl --user stop pipewire pipewire.socket)" >&2
     exit 1
 fi
 
