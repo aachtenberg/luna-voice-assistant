@@ -191,6 +191,13 @@ def ask_stream(request: AskRequest):
                 full_text_parts.append(token)
                 yield f"data: {json.dumps({'token': token})}\n\n"
 
+            # Empty answer (model spent its turns on tools, then said nothing)
+            # would leave the voice silent — give it something to say.
+            if not "".join(full_text_parts).strip():
+                fallback = "Sorry, I couldn't come up with an answer for that."
+                full_text_parts.append(fallback)
+                yield f"data: {json.dumps({'token': fallback})}\n\n"
+
             full_response = clean_for_tts("".join(full_text_parts))
             yield f"data: {json.dumps({'done': True})}\n\n"
 

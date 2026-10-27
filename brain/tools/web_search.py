@@ -15,6 +15,13 @@ def web_search(query: str) -> str:
 
         results = data.get("results", [])[:5]
         if not results:
+            # Every engine suspended/CAPTCHA'd: say so, or the model keeps
+            # rephrasing the query until it runs out of tool turns.
+            down = [e[0] for e in data.get("unresponsive_engines", []) if e]
+            if down:
+                return ("Web search is unavailable right now (search engines are "
+                        f"blocking requests: {', '.join(down)}). Do not search again; "
+                        "tell the user you can't look that up at the moment.")
             return "No results found."
 
         summaries = []

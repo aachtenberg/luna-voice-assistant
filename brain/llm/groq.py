@@ -46,14 +46,27 @@ class GroqProvider(LLMProvider):
                 "messages": messages,
                 "max_tokens": 1024,
             }
-            if iteration < max_iterations - 1 and groq_tools:
+            last_turn = iteration == max_iterations - 1 or not groq_tools
+            if not last_turn:
                 kwargs["tools"] = groq_tools
                 kwargs["tool_choice"] = "auto"
+            else:
+                kwargs["messages"] = messages + [{
+                    "role": "system",
+                    "content": "No more tool calls are available. Answer the user now "
+                               "in one or two spoken sentences from what you have, or "
+                               "say you couldn't find it."
+                }]
 
             try:
                 response = self.client.chat.completions.create(**kwargs)
             except Exception as e:
                 print(f"Groq error: {e}")
+                # gpt-oss sometimes still emits a tool call with tools removed; Groq
+                # rejects it (tool_use_failed). That's an answer failure, not an
+                # outage — don't fall through to the next provider.
+                if last_turn and "tool_use_failed" in str(e):
+                    return "Sorry, I couldn't find an answer to that."
                 raise  # propagate to FallbackProvider
 
             message = response.choices[0].message
