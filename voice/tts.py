@@ -204,8 +204,13 @@ def speak_streamed(token_iter, on_first_audio=None, mute_mic=True):
                     first_audio_fired = True
 
                 with _playback_lock:
-                    _playback_process = subprocess.Popen(["pw-play", tmp_path])
-                _playback_process.wait(timeout=60)
+                    # Barge-in/Stop during synthesis: don't start this sentence.
+                    # Checked under the lock stop_speaking() takes, so a stop
+                    # either lands here or terminates the process we start.
+                    if _stream_stop.is_set():
+                        break
+                    play = _playback_process = subprocess.Popen(["pw-play", tmp_path])
+                play.wait(timeout=60)
             except subprocess.TimeoutExpired:
                 stop_speaking()
             except Exception as e:

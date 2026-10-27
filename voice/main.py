@@ -398,16 +398,17 @@ def main():
             if not running:
                 break
 
-            # Barge-in: skip follow-up/cleanup, start new conversation immediately
-            if barged_in:
-                log.info("Barge-in: restarting conversation", extra={"event": "barge_in_restart"})
-                pending_conversation = True
-                continue
-
-            # Stopped via button/MQTT: no follow-up, straight back to wake word
+            # Stopped via button/MQTT: no follow-up, straight back to wake word.
+            # Wins over a barge-in, so Stop after "hey luna" doesn't get "Yes?"
             stopped = stop_requested.is_set()
             if stopped:
                 log.info("Stopped by request", extra={"event": "stopped"})
+
+            # Barge-in: skip follow-up/cleanup, start new conversation immediately
+            if barged_in and not stopped:
+                log.info("Barge-in: restarting conversation", extra={"event": "barge_in_restart"})
+                pending_conversation = True
+                continue
 
             # Check if response ends with a question - if so, listen for follow-up
             expects_followup = not stopped and response.strip().endswith("?")
@@ -465,7 +466,7 @@ def main():
                                 "duration_ms": int(brain_duration * 1000)
                             })
 
-                            if barged_in:
+                            if barged_in and not stop_requested.is_set():
                                 log.info("Barge-in during follow-up", extra={"event": "barge_in_restart"})
                                 pending_conversation = True
                                 continue
