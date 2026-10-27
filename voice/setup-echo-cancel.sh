@@ -52,8 +52,12 @@ context.modules = [
         node.name = "luna_ec_reference"
         node.linger = true
       }
+      # NS and transient suppression erased the user's wake word while Luna
+      # was talking (double-talk); the AEC alone already removes the echo.
       aec.args = {
         webrtc.gain_control = false
+        webrtc.noise_suppression = false
+        webrtc.transient_suppression = false
       }
     }
   }

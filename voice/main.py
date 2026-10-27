@@ -280,6 +280,7 @@ def main():
                     continue
 
             # === Conversation start ===
+            after_barge_in = pending_conversation
             pending_conversation = False
             stop_requested.clear()
             conversation_start = time.time()
@@ -340,11 +341,17 @@ def main():
 
             STT_DURATION.observe(stt_duration)
 
-            if not text:
-                STT_REQUESTS.labels(status="empty").inc()
-                log.info("Transcription empty", extra={"event": "stt_empty", "duration_ms": int(stt_duration * 1000)})
-                TTS_REQUESTS.inc()
-                speak("Sorry, I didn't catch that.")
+            # Stop pressed while she was listening for the question: drop the turn
+            if stop_requested.is_set() or not text:
+                if stop_requested.is_set():
+                    log.info("Stopped by request", extra={"event": "stopped"})
+                else:
+                    STT_REQUESTS.labels(status="empty").inc()
+                    log.info("Transcription empty", extra={"event": "stt_empty", "duration_ms": int(stt_duration * 1000)})
+                    # After a barge-in, silence usually just means "stop" — don't nag
+                    if not after_barge_in:
+                        TTS_REQUESTS.inc()
+                        speak("Sorry, I didn't catch that.")
                 time.sleep(POST_EMPTY_PAUSE)
                 detector.reset()
                 recorder.open_stream(flush_buffer=True)
