@@ -13,10 +13,10 @@ from kasa import (
 
 # Kasa switches
 KASA_DEVICES = {
-    "kitchen": "192.168.0.133",
-    "kitchen light": "192.168.0.133",
-    "patio": "192.168.0.179",
-    "patio light": "192.168.0.179",
+    "kitchen": "192.168.0.34",
+    "kitchen light": "192.168.0.34",
+    "patio": "192.168.0.31",
+    "patio light": "192.168.0.31",
 }
 
 # Kasa KL125 bulbs, grouped by room. A room's bulbs are controlled together.
@@ -24,7 +24,7 @@ KASA_DEVICES = {
 # firmware closes the unauthenticated port 9999 protocol and wants a KLAP login
 # that python-kasa cannot complete for these bulbs.
 KASA_BULBS = {
-    "living room": ["192.168.0.10", "192.168.0.2"],
+    "living room": ["192.168.0.23", "192.168.0.42"],
     "ethan's room": ["192.168.0.59"],
 }
 
