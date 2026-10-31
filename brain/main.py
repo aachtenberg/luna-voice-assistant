@@ -23,6 +23,7 @@ from metrics import (
     get_metrics, get_content_type
 )
 from logging_config import setup_logging
+import probes
 import tracing
 
 # Setup structured logging (JSON for Loki, plain text if LOG_FORMAT=text)
@@ -109,6 +110,7 @@ log.info(
 )
 llm = _build_llm(current_config)
 _set_provider_metric(current_config["provider"])
+probes.start(lambda: llm)
 
 
 class AskRequest(BaseModel):
@@ -370,6 +372,13 @@ def reset_provider_config():
             extra={"event": "llm_reset", "config": _public_config()},
         )
     return _public_config()
+
+
+@app.post("/admin/probe")
+def run_probes():
+    """Check once that the LLM chain and web search answer. Spends no credits
+    and leaves conversation history alone: see probes.py."""
+    return {"results": probes.run(llm)}
 
 
 @app.get("/admin/ollama-models")

@@ -81,6 +81,11 @@ GROQ_MAX_ITERATIONS = _cfg("groq", "max_iterations", default=5)
 # Conversation
 MAX_HISTORY = _cfg("conversation", "max_history", default=12)
 
+# Health probes (see probes.py). 0 means no timer; POST /admin/probe still runs them.
+PROBE_INTERVAL_SECONDS = int(os.getenv("PROBE_INTERVAL_SECONDS", "0"))
+PROBE_SEARCH_INTERVAL_SECONDS = int(os.getenv("PROBE_SEARCH_INTERVAL_SECONDS", "3600"))
+PROBE_OLLAMA_HELLO = os.getenv("PROBE_OLLAMA_HELLO", "false").lower() in ("1", "true", "yes", "on")
+
 # Keepalive
 KEEPALIVE_INTERVAL = _cfg("keepalive", "interval", default=180)
 KEEPALIVE_NUM_PREDICT = _cfg("keepalive", "num_predict", default=1)

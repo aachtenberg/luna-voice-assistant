@@ -56,6 +56,25 @@ TOOL_ERRORS = Counter(
     ['tool_name']
 )
 
+# Health probes (see probes.py)
+PROBE_SUCCESS = Gauge(
+    'brain_probe_success',
+    'Whether the last run of a health probe passed (1=yes)',
+    ['check']
+)
+
+PROBE_DURATION = Gauge(
+    'brain_probe_duration_seconds',
+    'How long the last run of a health probe took',
+    ['check']
+)
+
+PROBE_LAST_RUN = Gauge(
+    'brain_probe_last_run_timestamp_seconds',
+    'When a health probe last ran',
+    ['check']
+)
+
 # Current state
 CURRENT_PROVIDER = Gauge(
     'brain_current_provider',

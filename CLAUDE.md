@@ -27,6 +27,7 @@ luna-voice-assistant/
 │   ├── main.py              # /ask and /ask/stream endpoints
 │   ├── prompts.py           # System prompt + tool definitions
 │   ├── config.py            # Environment-based configuration
+│   ├── probes.py            # Health probes that spend no credits
 │   ├── tracing.py           # Opt-in OpenTelemetry spans
 │   ├── llm/                 # Provider implementations + fallback chain
 │   └── tools/               # Tool implementations
@@ -213,6 +214,38 @@ A barge-in hangs up on the brain, so its server span reads ERROR
 Metrics stay on Prometheus and logs on Loki. Tempo derives span metrics into
 Prometheus as `traces_spanmetrics_*`.
 
+## Health probes
+
+`/health` only says the process is up. `brain/probes.py` asks whether Luna can
+still do her job, and spends no credits doing it:
+
+```bash
+curl -X POST http://<brain>:8000/admin/probe   # run every check once, now
+```
+
+| Check | What it does | What it catches | What it misses |
+|-------|--------------|-----------------|----------------|
+| `groq` | Lists models, no tokens | Bad key, outage, retired model | Spent quota |
+| `ollama` | Lists installed models, nothing loaded | Server down, model not pulled | A model that won't run |
+| `search` | One SearXNG query | Empty results, engines blocked, SearXNG down | |
+
+Anthropic isn't checked: it isn't funded, so it would only ever fail. Results go to
+`brain_probe_success`, `brain_probe_duration_seconds` and
+`brain_probe_last_run_timestamp_seconds`, labelled by `check`, and failures to the log.
+
+**No timer yet, on purpose.** `PROBE_INTERVAL_SECONDS` defaults to 0: no thread, no
+calls, no metrics. It stays 0 until a local model does all the inference. Then, in
+the deploy repo, set:
+
+- `PROBE_INTERVAL_SECONDS=900`.
+- `PROBE_OLLAMA_HELLO=true`, which adds a real chat a few tokens long to `ollama`,
+  catching a model that won't run. Only on a GPU Luna doesn't share: the hello loads
+  the model and could evict someone else's.
+- `PROBE_SEARCH_INTERVAL_SECONDS` stays at 3600. Each query spends search engine quota.
+
+**Rules**: never send a prompt to a paid provider from a probe, and never go through
+`/ask`, which writes to the one history every conversation shares.
+
 ## USB Audio Setup (Anker PowerConf S330)
 
 The Anker S330 USB speakerphone is the audio device for both mic input and speaker output. On the Pi 3, USB isochronous transfers can drop under sustained load, causing the audio capture stream to stall and hang `read_chunk()` indefinitely.
@@ -250,6 +283,7 @@ Both services use `.env` files (not committed, see `.env.example`):
 - MQTT_BROKER (cluster-internal: `mosquitto.iot.svc.cluster.local`)
 - LOCATION_CITY, LOCATION_REGION, LOCATION_COUNTRY, LOCATION_TIMEZONE, LOCATION_LAT, LOCATION_LON
 - OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_RESOURCE_ATTRIBUTES (see Tracing)
+- PROBE_INTERVAL_SECONDS, PROBE_SEARCH_INTERVAL_SECONDS, PROBE_OLLAMA_HELLO (see Health probes)
 - Secrets via k8s Secret `luna-brain-secrets`
 
 These env vars are **startup defaults**. The provider/model routing fields
