@@ -1,4 +1,5 @@
 import psycopg2
+import tracing
 from config import TIMESCALEDB_HOST, TIMESCALEDB_PORT, TIMESCALEDB_DATABASE, TIMESCALEDB_USER, TIMESCALEDB_PASSWORD
 
 
@@ -30,4 +31,5 @@ def query_timescaledb(sql: str) -> str:
         finally:
             conn.close()
     except Exception as e:
+        tracing.mark_error(type(e).__name__)
         return f"TimescaleDB error: {e}"

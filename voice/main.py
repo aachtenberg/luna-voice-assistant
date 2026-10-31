@@ -7,6 +7,7 @@ import sys
 import time
 import json
 import threading
+import contextvars
 import numpy as np
 import paho.mqtt.client as mqtt
 from audio import AudioRecorder
@@ -22,6 +23,7 @@ from config import (
 )
 from logging_config import setup_logging
 from metrics_server import start_metrics_server
+import tracing
 from metrics import (
     WAKEWORD_DETECTIONS, WAKEWORD_FALSE_TRIGGERS,
     RECORDING_DURATION, STT_REQUESTS, STT_DURATION,
@@ -143,6 +145,7 @@ def _speak_with_barge_in(recorder, barge_recorder, detector, token_iter, on_firs
                     debug_frames.append(chunk)
                 if detector.detect(chunk):
                     log.info("Barge-in: wake word during TTS", extra={"event": "barge_in"})
+                    tracing.event("barge_in", {"luna.wake.score": round(detector.max_score, 3)})
                     barged_in.set()
                     stop_speaking()
                     break
@@ -161,6 +164,8 @@ def _speak_with_barge_in(recorder, barge_recorder, detector, token_iter, on_firs
                        "max_amplitude": int(max_amplitude),
                        "mic": str(mic.device_index or "default")}
             )
+            tracing.annotate({"luna.barge.max_score": round(detector.max_score, 3),
+                              "luna.barge.max_amplitude": int(max_amplitude)})
             # Debug: keep the last barge-in window on disk for offline
             # analysis of what the detector actually hears during TTS.
             if debug_frames:
@@ -175,7 +180,9 @@ def _speak_with_barge_in(recorder, barge_recorder, detector, token_iter, on_firs
                     log.warning(f"Barge-in debug wav write failed: {e}",
                                 extra={"event": "barge_in_debug_error"})
 
-    monitor_thread = threading.Thread(target=monitor, daemon=True)
+    # In a copy of this context so its log lines and spans join the conversation
+    monitor_thread = threading.Thread(
+        target=contextvars.copy_context().run, args=(monitor,), daemon=True)
     monitor_thread.start()
 
     response = speak_streamed(token_iter, on_first_audio=on_first_audio, mute_mic=False)
@@ -191,9 +198,29 @@ def _speak_with_barge_in(recorder, barge_recorder, detector, token_iter, on_firs
     return response, barged_in.is_set()
 
 
+def _answer(text, recorder, barge_recorder, detector, followup=False):
+    """Stream the brain's answer through TTS. Returns (response, barged_in)."""
+    with tracing.span("answer", {"luna.followup": followup}) as answer:
+        if BARGE_IN_ENABLED:
+            response, barged_in = _speak_with_barge_in(
+                recorder, barge_recorder, detector,
+                ask_stream(text),
+                on_first_audio=stop_thinking_loop
+            )
+        else:
+            barged_in = False
+            response = speak_streamed(
+                ask_stream(text),
+                on_first_audio=stop_thinking_loop
+            )
+        answer.set_attributes({"luna.response.chars": len(response), "luna.barged_in": barged_in})
+    return response, barged_in
+
+
 def main():
     global running
     log.info("Starting voice assistant", extra={"event": "startup"})
+    tracing.init_tracing("luna-voice")
 
     # Start metrics server on port 8001 (non-blocking background thread)
     metrics_server = start_metrics_server(port=8001, on_stop=lambda: request_stop("http"))
@@ -284,205 +311,198 @@ def main():
             pending_conversation = False
             stop_requested.clear()
             conversation_start = time.time()
-            WAKEWORD_DETECTIONS.inc()
-            LISTENING_STATE.set(0)
-            log.info("Wake word detected", extra={"event": "wakeword_detected"})
-            detector.reset()
-
-            # Close mic before speaking to avoid feedback/self-triggering
-            recorder.close_stream()
-            TTS_REQUESTS.inc()
-            speak("Yes?")
-            time.sleep(POST_TTS_PAUSE)
-
-            if not running:
-                break
-
-            recorder.open_stream(flush_buffer=False)  # Don't flush - start recording immediately
-
-            # Record user speech (with concurrent STT if enabled)
-            record_start = time.time()
-
-            if STREAMING_STT_ENABLED:
-                # Streaming: record and transcribe concurrently
-                session = recorder.record_until_silence_streaming(max_seconds=MAX_RECORD_SECONDS)
-                stt_start = time.time()
-                text = transcribe_streaming(session)
-                session.thread.join(timeout=2.0)
-                recorder.close_stream()
-                recording_duration = time.time() - record_start
-                RECORDING_DURATION.observe(recording_duration)
-                stt_duration = time.time() - stt_start
-
-                audio_data = session.get_audio_snapshot()
-                if len(audio_data) < MIN_SPEECH_BYTES:
-                    WAKEWORD_FALSE_TRIGGERS.inc()
-                    log.info("No speech after wake word", extra={"event": "no_speech"})
-                    recorder.open_stream()
-                    LISTENING_STATE.set(1)
-                    continue
-            else:
-                # Sequential fallback
-                audio_data = recorder.record_until_silence(max_seconds=MAX_RECORD_SECONDS)
-                recorder.close_stream()
-                recording_duration = time.time() - record_start
-                RECORDING_DURATION.observe(recording_duration)
-
-                if len(audio_data) < MIN_SPEECH_BYTES:
-                    WAKEWORD_FALSE_TRIGGERS.inc()
-                    log.info("No speech after wake word", extra={"event": "no_speech"})
-                    recorder.open_stream()
-                    LISTENING_STATE.set(1)
-                    continue
-
-                stt_start = time.time()
-                text = transcribe(audio_data)
-                stt_duration = time.time() - stt_start
-
-            STT_DURATION.observe(stt_duration)
-
-            # Stop pressed while she was listening for the question: drop the turn
-            if stop_requested.is_set() or not text:
-                if stop_requested.is_set():
-                    log.info("Stopped by request", extra={"event": "stopped"})
-                else:
-                    STT_REQUESTS.labels(status="empty").inc()
-                    log.info("Transcription empty", extra={"event": "stt_empty", "duration_ms": int(stt_duration * 1000)})
-                    # After a barge-in, silence usually just means "stop" — don't nag
-                    if not after_barge_in:
-                        TTS_REQUESTS.inc()
-                        speak("Sorry, I didn't catch that.")
-                time.sleep(POST_EMPTY_PAUSE)
+            conversation_attributes = {
+                "luna.trigger": "barge_in" if after_barge_in else "wake_word",
+                "luna.wake.score": round(detector.max_score, 3),
+            }
+            with tracing.span("conversation", conversation_attributes) as conversation:
+                WAKEWORD_DETECTIONS.inc()
+                LISTENING_STATE.set(0)
+                log.info("Wake word detected", extra={"event": "wakeword_detected"})
                 detector.reset()
-                recorder.open_stream(flush_buffer=True)
-                cooldown_remaining = COOLDOWN_CHUNKS
-                LISTENING_STATE.set(1)
-                continue
 
-            STT_REQUESTS.labels(status="success").inc()
-            log.info(f"Transcribed: {text}", extra={"event": "stt_success", "duration_ms": int(stt_duration * 1000)})
-
-            # Start thinking sound loop while we wait for LLM
-            start_thinking_loop()
-
-            # Stream response from brain → TTS
-            brain_start = time.time()
-            TTS_REQUESTS.inc()
-            barged_in = False
-
-            if BARGE_IN_ENABLED:
-                response, barged_in = _speak_with_barge_in(
-                    recorder, barge_recorder, detector,
-                    ask_stream(text),
-                    on_first_audio=stop_thinking_loop
-                )
-            else:
-                response = speak_streamed(
-                    ask_stream(text),
-                    on_first_audio=stop_thinking_loop
-                )
-
-            brain_duration = time.time() - brain_start
-            BRAIN_DURATION.observe(brain_duration)
-            BRAIN_REQUESTS.labels(status="success").inc()
-
-            # Always ensure thinking sound is stopped
-            stop_thinking_loop()
-
-            log.info(f"Brain response: {response[:100]}...", extra={
-                "event": "brain_response",
-                "duration_ms": int(brain_duration * 1000),
-                "response_length": len(response)
-            })
-
-            if not running:
-                break
-
-            # Stopped via button/MQTT: no follow-up, straight back to wake word.
-            # Wins over a barge-in, so Stop after "hey luna" doesn't get "Yes?"
-            stopped = stop_requested.is_set()
-            if stopped:
-                log.info("Stopped by request", extra={"event": "stopped"})
-
-            # Barge-in: skip follow-up/cleanup, start new conversation immediately
-            if barged_in and not stopped:
-                log.info("Barge-in: restarting conversation", extra={"event": "barge_in_restart"})
-                pending_conversation = True
-                continue
-
-            # Check if response ends with a question - if so, listen for follow-up
-            expects_followup = not stopped and response.strip().endswith("?")
-
-            if expects_followup:
-                log.info("Waiting for follow-up", extra={"event": "followup_listening"})
-                time.sleep(POST_TTS_PAUSE)
-                recorder.open_stream(flush_buffer=True)
-
-                # Listen for follow-up (shorter timeout, same silence detection)
-                audio_data = recorder.record_until_silence(max_seconds=FOLLOWUP_MAX_SECONDS)
+                # Close mic before speaking to avoid feedback/self-triggering
                 recorder.close_stream()
+                TTS_REQUESTS.inc()
+                speak("Yes?")
+                time.sleep(POST_TTS_PAUSE)
 
-                if len(audio_data) >= MIN_SPEECH_BYTES:  # Got speech
+                if not running:
+                    break
+
+                recorder.open_stream(flush_buffer=False)  # Don't flush - start recording immediately
+
+                # Record user speech (with concurrent STT if enabled)
+                record_start = time.time()
+
+                if STREAMING_STT_ENABLED:
+                    # Streaming: record and transcribe concurrently
+                    session = recorder.record_until_silence_streaming(max_seconds=MAX_RECORD_SECONDS)
                     stt_start = time.time()
-                    followup_text = transcribe(audio_data)
+                    text = transcribe_streaming(session)
+                    session.thread.join(timeout=2.0)
+                    recorder.close_stream()
+                    recording_duration = time.time() - record_start
+                    RECORDING_DURATION.observe(recording_duration)
                     stt_duration = time.time() - stt_start
-                    STT_DURATION.observe(stt_duration)
 
-                    if followup_text:
-                        STT_REQUESTS.labels(status="success").inc()
-                        # Check for dismissive responses
-                        dismissals = ["no", "nope", "never mind", "nevermind", "that's all", "nothing", "i'm good", "no thanks"]
-                        if followup_text.lower().strip().rstrip('.!') in dismissals:
-                            log.info(f"Followup dismissed: {followup_text}", extra={"event": "followup_dismissed"})
-                            TTS_REQUESTS.inc()
-                            speak("Okay!")
-                        else:
-                            log.info(f"Followup: {followup_text}", extra={"event": "followup_received"})
-
-                            # Process follow-up (streamed, with barge-in)
-                            start_thinking_loop()
-                            brain_start = time.time()
-                            TTS_REQUESTS.inc()
-
-                            if BARGE_IN_ENABLED:
-                                followup_response, barged_in = _speak_with_barge_in(
-                                    recorder, barge_recorder, detector,
-                                    ask_stream(followup_text),
-                                    on_first_audio=stop_thinking_loop
-                                )
-                            else:
-                                followup_response = speak_streamed(
-                                    ask_stream(followup_text),
-                                    on_first_audio=stop_thinking_loop
-                                )
-
-                            brain_duration = time.time() - brain_start
-                            BRAIN_DURATION.observe(brain_duration)
-                            BRAIN_REQUESTS.labels(status="success").inc()
-                            stop_thinking_loop()
-
-                            log.info(f"Followup response: {followup_response[:100]}...", extra={
-                                "event": "followup_response",
-                                "duration_ms": int(brain_duration * 1000)
-                            })
-
-                            if barged_in and not stop_requested.is_set():
-                                log.info("Barge-in during follow-up", extra={"event": "barge_in_restart"})
-                                pending_conversation = True
-                                continue
-                    else:
-                        STT_REQUESTS.labels(status="empty").inc()
+                    audio_data = session.get_audio_snapshot()
+                    if len(audio_data) < MIN_SPEECH_BYTES:
+                        WAKEWORD_FALSE_TRIGGERS.inc()
+                        conversation.set_attribute("luna.outcome", "no_speech")
+                        log.info("No speech after wake word", extra={"event": "no_speech"})
+                        recorder.open_stream()
+                        LISTENING_STATE.set(1)
+                        continue
                 else:
-                    log.info("No follow-up detected", extra={"event": "no_followup"})
+                    # Sequential fallback
+                    with tracing.span("audio.record"):
+                        audio_data = recorder.record_until_silence(max_seconds=MAX_RECORD_SECONDS)
+                    recorder.close_stream()
+                    recording_duration = time.time() - record_start
+                    RECORDING_DURATION.observe(recording_duration)
 
-            # Record conversation metrics
-            conversation_duration = time.time() - conversation_start
-            CONVERSATIONS_TOTAL.inc()
-            CONVERSATION_DURATION.observe(conversation_duration)
-            log.info("Conversation complete", extra={
-                "event": "conversation_complete",
-                "duration_ms": int(conversation_duration * 1000)
-            })
+                    if len(audio_data) < MIN_SPEECH_BYTES:
+                        WAKEWORD_FALSE_TRIGGERS.inc()
+                        conversation.set_attribute("luna.outcome", "no_speech")
+                        log.info("No speech after wake word", extra={"event": "no_speech"})
+                        recorder.open_stream()
+                        LISTENING_STATE.set(1)
+                        continue
+
+                    stt_start = time.time()
+                    text = transcribe(audio_data)
+                    stt_duration = time.time() - stt_start
+
+                STT_DURATION.observe(stt_duration)
+
+                # Stop pressed while she was listening for the question: drop the turn
+                if stop_requested.is_set() or not text:
+                    if stop_requested.is_set():
+                        conversation.set_attribute("luna.outcome", "stopped")
+                        log.info("Stopped by request", extra={"event": "stopped"})
+                    else:
+                        conversation.set_attribute("luna.outcome", "empty_transcript")
+                        STT_REQUESTS.labels(status="empty").inc()
+                        log.info("Transcription empty", extra={"event": "stt_empty", "duration_ms": int(stt_duration * 1000)})
+                        # After a barge-in, silence usually just means "stop" — don't nag
+                        if not after_barge_in:
+                            TTS_REQUESTS.inc()
+                            speak("Sorry, I didn't catch that.")
+                    time.sleep(POST_EMPTY_PAUSE)
+                    detector.reset()
+                    recorder.open_stream(flush_buffer=True)
+                    cooldown_remaining = COOLDOWN_CHUNKS
+                    LISTENING_STATE.set(1)
+                    continue
+
+                STT_REQUESTS.labels(status="success").inc()
+                log.info(f"Transcribed: {text}", extra={"event": "stt_success", "duration_ms": int(stt_duration * 1000)})
+
+                # Start thinking sound loop while we wait for LLM
+                start_thinking_loop()
+
+                # Stream response from brain → TTS
+                brain_start = time.time()
+                TTS_REQUESTS.inc()
+                response, barged_in = _answer(text, recorder, barge_recorder, detector)
+
+                brain_duration = time.time() - brain_start
+                BRAIN_DURATION.observe(brain_duration)
+                BRAIN_REQUESTS.labels(status="success").inc()
+
+                # Always ensure thinking sound is stopped
+                stop_thinking_loop()
+
+                log.info(f"Brain response: {response[:100]}...", extra={
+                    "event": "brain_response",
+                    "duration_ms": int(brain_duration * 1000),
+                    "response_length": len(response)
+                })
+
+                if not running:
+                    break
+
+                # Stopped via button/MQTT: no follow-up, straight back to wake word.
+                # Wins over a barge-in, so Stop after "hey luna" doesn't get "Yes?"
+                stopped = stop_requested.is_set()
+                conversation.set_attribute(
+                    "luna.outcome", "stopped" if stopped else "barged_in" if barged_in else "answered")
+                if stopped:
+                    log.info("Stopped by request", extra={"event": "stopped"})
+
+                # Barge-in: skip follow-up/cleanup, start new conversation immediately
+                if barged_in and not stopped:
+                    log.info("Barge-in: restarting conversation", extra={"event": "barge_in_restart"})
+                    pending_conversation = True
+                    continue
+
+                # Check if response ends with a question - if so, listen for follow-up
+                expects_followup = not stopped and response.strip().endswith("?")
+
+                if expects_followup:
+                    log.info("Waiting for follow-up", extra={"event": "followup_listening"})
+                    time.sleep(POST_TTS_PAUSE)
+                    recorder.open_stream(flush_buffer=True)
+
+                    # Listen for follow-up (shorter timeout, same silence detection)
+                    with tracing.span("audio.record"):
+                        audio_data = recorder.record_until_silence(max_seconds=FOLLOWUP_MAX_SECONDS)
+                    recorder.close_stream()
+
+                    if len(audio_data) >= MIN_SPEECH_BYTES:  # Got speech
+                        stt_start = time.time()
+                        followup_text = transcribe(audio_data)
+                        stt_duration = time.time() - stt_start
+                        STT_DURATION.observe(stt_duration)
+
+                        if followup_text:
+                            STT_REQUESTS.labels(status="success").inc()
+                            # Check for dismissive responses
+                            dismissals = ["no", "nope", "never mind", "nevermind", "that's all", "nothing", "i'm good", "no thanks"]
+                            if followup_text.lower().strip().rstrip('.!') in dismissals:
+                                log.info(f"Followup dismissed: {followup_text}", extra={"event": "followup_dismissed"})
+                                TTS_REQUESTS.inc()
+                                speak("Okay!")
+                            else:
+                                log.info(f"Followup: {followup_text}", extra={"event": "followup_received"})
+                                conversation.set_attribute("luna.followup", True)
+
+                                # Process follow-up (streamed, with barge-in)
+                                start_thinking_loop()
+                                brain_start = time.time()
+                                TTS_REQUESTS.inc()
+                                followup_response, barged_in = _answer(
+                                    followup_text, recorder, barge_recorder, detector, followup=True)
+
+                                brain_duration = time.time() - brain_start
+                                BRAIN_DURATION.observe(brain_duration)
+                                BRAIN_REQUESTS.labels(status="success").inc()
+                                stop_thinking_loop()
+
+                                log.info(f"Followup response: {followup_response[:100]}...", extra={
+                                    "event": "followup_response",
+                                    "duration_ms": int(brain_duration * 1000)
+                                })
+
+                                if barged_in and not stop_requested.is_set():
+                                    conversation.set_attribute("luna.outcome", "barged_in")
+                                    log.info("Barge-in during follow-up", extra={"event": "barge_in_restart"})
+                                    pending_conversation = True
+                                    continue
+                        else:
+                            STT_REQUESTS.labels(status="empty").inc()
+                    else:
+                        log.info("No follow-up detected", extra={"event": "no_followup"})
+
+                # Record conversation metrics
+                conversation_duration = time.time() - conversation_start
+                CONVERSATIONS_TOTAL.inc()
+                CONVERSATION_DURATION.observe(conversation_duration)
+                log.info("Conversation complete", extra={
+                    "event": "conversation_complete",
+                    "duration_ms": int(conversation_duration * 1000)
+                })
 
             # Reset detector state completely
             detector.reset()

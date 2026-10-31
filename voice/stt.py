@@ -2,6 +2,7 @@ import httpx
 import io
 import wave
 import logging
+import tracing
 from config import WHISPER_URL, TARGET_SAMPLE_RATE, CHANNELS
 
 log = logging.getLogger("voice")
@@ -106,8 +107,14 @@ def _post_transcription_request(wav_buffer: io.BytesIO, timeout: float) -> str:
     return ""
 
 
+def _audio_seconds(audio_data: bytes) -> float:
+    return round(len(audio_data) / (2 * TARGET_SAMPLE_RATE), 2)
+
+
+@tracing.traced("stt.transcribe", kind="client")
 def transcribe(audio_data: bytes) -> str:
     """Send audio to Whisper and get transcription."""
+    tracing.annotate({"luna.audio.seconds": _audio_seconds(audio_data)})
     # Convert raw audio to WAV format
     wav_buffer = io.BytesIO()
     with wave.open(wav_buffer, 'wb') as wav_file:
@@ -120,15 +127,18 @@ def transcribe(audio_data: bytes) -> str:
 
     try:
         text = _post_transcription_request(wav_buffer, timeout=30.0)
+        tracing.annotate({"luna.stt.chars": len(text)})
 
         # Filter out known hallucinations
         if is_hallucination(text):
             print(f"Filtered hallucination: '{text}'")
+            tracing.annotate({"luna.stt.filtered": True})
             return ""
 
         return text
     except Exception as e:
         print(f"Transcription error: {e}")
+        tracing.mark_error(type(e).__name__)
         return ""
 
 
@@ -150,25 +160,31 @@ def transcribe_streaming(session) -> str:
     Sends a partial request to warm up the server while recording continues,
     then sends the final complete audio once recording is done.
     """
-    # Wait for enough audio to send a partial (warm-up) request
-    session.wait_for_partial(timeout=5.0)
+    # The warm-up blocks, so it nests here: a slow one holds the turn up even
+    # after the user has stopped talking.
+    with tracing.span("audio.record"):
+        # Wait for enough audio to send a partial (warm-up) request
+        session.wait_for_partial(timeout=5.0)
 
-    if not session.recording_done.is_set():
-        # Recording still in progress — send partial audio to warm up the server
-        partial_audio = session.get_audio_snapshot()
-        if len(partial_audio) > 1600:
-            try:
-                wav_buf = _audio_to_wav(partial_audio)
-                _post_transcription_request(wav_buf, timeout=10.0)
-                log.debug("Partial STT warm-up sent", extra={"event": "stt_warmup"})
-            except Exception:
-                pass  # Warm-up is best-effort
+        if not session.recording_done.is_set():
+            # Recording still in progress — send partial audio to warm up the server
+            partial_audio = session.get_audio_snapshot()
+            if len(partial_audio) > 1600:
+                try:
+                    with tracing.span("stt.warmup", kind="client"):
+                        wav_buf = _audio_to_wav(partial_audio)
+                        _post_transcription_request(wav_buf, timeout=10.0)
+                    log.debug("Partial STT warm-up sent", extra={"event": "stt_warmup"})
+                except Exception:
+                    pass  # Warm-up is best-effort
 
-    # Wait for recording to finish
-    session.wait_for_done(timeout=15.0)
+        # Wait for recording to finish
+        session.wait_for_done(timeout=15.0)
 
-    # Send the complete audio for final transcription
-    final_audio = session.get_audio_snapshot()
+        # Send the complete audio for final transcription
+        final_audio = session.get_audio_snapshot()
+        tracing.annotate({"luna.audio.seconds": _audio_seconds(final_audio)})
+
     if len(final_audio) < 1600:
         return ""
 

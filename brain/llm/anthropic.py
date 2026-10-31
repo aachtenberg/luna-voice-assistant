@@ -3,7 +3,8 @@
 import inspect
 
 import anthropic
-from .base import LLMProvider, convert_tools_to_anthropic
+import tracing
+from .base import LLMProvider, chat_attributes, convert_tools_to_anthropic
 
 
 class AnthropicProvider(LLMProvider):
@@ -55,7 +56,13 @@ class AnthropicProvider(LLMProvider):
                 kwargs["tool_choice"] = {"type": "auto"}
 
             try:
-                response = self.client.messages.create(**kwargs)
+                with tracing.span(f"chat {self.model}", chat_attributes("anthropic", self.model), kind="client"):
+                    response = self.client.messages.create(**kwargs)
+                    tracing.annotate({
+                        "gen_ai.usage.input_tokens": response.usage.input_tokens,
+                        "gen_ai.usage.output_tokens": response.usage.output_tokens,
+                        "gen_ai.response.finish_reasons": [response.stop_reason],
+                    })
                 print(f"[Claude] Stop reason: {response.stop_reason}")
                 print(f"[Claude] Content: {response.content}")
             except Exception as e:

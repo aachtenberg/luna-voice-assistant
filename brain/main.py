@@ -7,6 +7,7 @@ from typing import Optional
 from fastapi import FastAPI, Response, HTTPException
 from fastapi.responses import StreamingResponse, HTMLResponse
 from pydantic import BaseModel
+from starlette.concurrency import iterate_in_threadpool
 from llm import get_provider
 from tools import TOOL_REGISTRY
 from prompts import SYSTEM_PROMPT, TOOLS
@@ -22,11 +23,23 @@ from metrics import (
     get_metrics, get_content_type
 )
 from logging_config import setup_logging
+import tracing
 
 # Setup structured logging (JSON for Loki, plain text if LOG_FORMAT=text)
 log = setup_logging(json_output=os.getenv("LOG_FORMAT", "text") != "text")
+tracing.init_tracing("luna-brain")
 
-app = FastAPI(title="Voice Assistant Brain")
+app = FastAPI(
+    title="Voice Assistant Brain",
+    # Once a tracer provider exists FastAPI makes each request's server span
+    # itself: it continues the caller's traceparent and stays open until a
+    # stream ends. Its per-request dependency/endpoint/serialization spans add
+    # nothing here, and a trace per Prometheus scrape less than nothing.
+    telemetry={
+        "operation_spans": False,
+        "exclude": lambda scope: scope["path"] in ("/health", "/metrics"),
+    },
+)
 
 # Conversation memory - stores recent exchanges
 conversation_history = []
@@ -149,6 +162,7 @@ def ask(request: AskRequest):
 
         duration_ms = int((time.time() - start_time) * 1000)
         REQUESTS_TOTAL.labels(status="success").inc()
+        tracing.annotate({"luna.response.chars": len(response_text)})
 
         log.info(f"Response sent: {response_text[:100]}...", extra={
             "event": "response",
@@ -170,6 +184,21 @@ def ask(request: AskRequest):
         raise e
     finally:
         REQUEST_DURATION.observe(time.time() - start_time)
+
+
+async def _close_on_disconnect(stream):
+    """Stream a sync generator, closing it as soon as the client goes away.
+
+    On a disconnect (every barge-in) Starlette just stops iterating, which
+    leaves the generator suspended until a GC reaches it: the request to Ollama
+    stays open, the model keeps generating into it, and its span reports
+    however long that took.
+    """
+    try:
+        async for chunk in iterate_in_threadpool(stream):
+            yield chunk
+    finally:
+        stream.close()
 
 
 @app.post("/ask/stream")
@@ -194,6 +223,7 @@ def ask_stream(request: AskRequest):
             # Empty answer (model spent its turns on tools, then said nothing)
             # would leave the voice silent — give it something to say.
             if not "".join(full_text_parts).strip():
+                tracing.event("empty_answer")
                 fallback = "Sorry, I couldn't come up with an answer for that."
                 full_text_parts.append(fallback)
                 yield f"data: {json.dumps({'token': fallback})}\n\n"
@@ -209,6 +239,7 @@ def ask_stream(request: AskRequest):
 
             duration_ms = int((time.time() - start_time) * 1000)
             REQUESTS_TOTAL.labels(status="success").inc()
+            tracing.annotate({"luna.response.chars": len(full_response)})
             log.info(f"Stream response sent: {full_response[:100]}...", extra={
                 "event": "stream_response",
                 "duration_ms": duration_ms,
@@ -216,6 +247,7 @@ def ask_stream(request: AskRequest):
             })
         except Exception as e:
             REQUESTS_TOTAL.labels(status="error").inc()
+            tracing.mark_error(type(e).__name__)
             log.error(f"Stream request failed: {e}", exc_info=True, extra={
                 "event": "stream_error",
                 "query": request.text
@@ -224,7 +256,7 @@ def ask_stream(request: AskRequest):
         finally:
             REQUEST_DURATION.observe(time.time() - start_time)
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(_close_on_disconnect(generate()), media_type="text/event-stream")
 
 
 @app.post("/clear-history")

@@ -1,4 +1,5 @@
 import paho.mqtt.client as mqtt
+import tracing
 from config import MQTT_BROKER, MQTT_PORT
 
 
@@ -13,6 +14,8 @@ def mqtt_publish(topic: str, payload: str) -> str:
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
             return f"Published to {topic}: {payload}"
         else:
+            tracing.mark_error("PublishFailed")
             return f"Failed to publish: {result.rc}"
     except Exception as e:
+        tracing.mark_error(type(e).__name__)
         return f"MQTT error: {e}"

@@ -1,6 +1,7 @@
 """Fallback provider chain — tries providers in order until one succeeds."""
 
 import logging
+import tracing
 from .base import LLMProvider
 
 log = logging.getLogger("brain")
@@ -31,12 +32,14 @@ class FallbackProvider(LLMProvider):
                 result = provider.chat(user_message, system_prompt, tools, history)
                 return result
             except Exception as e:
+                tracing.event("provider_fallback", {"luna.provider": name, "error.type": type(e).__name__})
                 log.warning(
                     f"{name} unavailable, trying next provider: {e}",
                     extra={"event": "provider_fallback", "provider": name, "error": str(e)}
                 )
                 last_exc = e
 
+        tracing.mark_error("AllProvidersFailed")
         log.error(
             f"All providers failed. Last error: {last_exc}",
             extra={"event": "all_providers_failed"}
@@ -56,17 +59,20 @@ class FallbackProvider(LLMProvider):
             except Exception as e:
                 if tokens_yielded:
                     # Already mid-stream — can't switch, just stop
+                    tracing.mark_error("ProviderFailedMidStream")
                     log.error(
                         f"{name} failed mid-stream after yielding tokens",
                         extra={"event": "provider_midstream_failure", "provider": name, "error": str(e)}
                     )
                     return
+                tracing.event("provider_fallback", {"luna.provider": name, "error.type": type(e).__name__})
                 log.warning(
                     f"{name} unavailable for streaming, trying next provider: {e}",
                     extra={"event": "provider_fallback_stream", "provider": name, "error": str(e)}
                 )
                 last_exc = e
 
+        tracing.mark_error("AllProvidersFailed")
         log.error(
             f"All providers failed for streaming. Last error: {last_exc}",
             extra={"event": "all_providers_failed"}

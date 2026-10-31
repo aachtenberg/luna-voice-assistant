@@ -7,3 +7,5 @@ httpx
 python-dotenv
 paho-mqtt
 prometheus-client
+opentelemetry-sdk>=1.44,<2
+opentelemetry-exporter-otlp-proto-http>=1.44,<2

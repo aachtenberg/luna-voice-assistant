@@ -4,6 +4,7 @@ import json
 import logging
 import sys
 from datetime import datetime, timezone
+from tracing import current_trace_id
 
 
 class JsonFormatter(logging.Formatter):
@@ -23,6 +24,8 @@ class JsonFormatter(logging.Formatter):
             log_obj["event"] = record.event
         if hasattr(record, "duration_ms"):
             log_obj["duration_ms"] = record.duration_ms
+        if getattr(record, "trace_id", None):
+            log_obj["trace_id"] = record.trace_id
         if hasattr(record, "extra"):
             log_obj.update(record.extra)
 
@@ -31,6 +34,16 @@ class JsonFormatter(logging.Formatter):
             log_obj["exception"] = self.formatException(record.exc_info)
 
         return json.dumps(log_obj)
+
+
+class TraceIdFilter(logging.Filter):
+    """Stamp each record with the current trace id. Spans carry no text, so
+    this is how a trace leads to the transcript in the logs, and back."""
+
+    def filter(self, record):
+        record.trace_id = current_trace_id()
+        record.trace_suffix = f" trace_id={record.trace_id}" if record.trace_id else ""
+        return True
 
 
 def setup_logging(json_output: bool = True):
@@ -48,9 +61,10 @@ def setup_logging(json_output: bool = True):
         handler.setFormatter(JsonFormatter())
     else:
         handler.setFormatter(logging.Formatter(
-            '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+            '%(asctime)s [%(levelname)s] %(name)s: %(message)s%(trace_suffix)s'
         ))
 
+    handler.addFilter(TraceIdFilter())
     root.addHandler(handler)
     return logging.getLogger("voice")
 

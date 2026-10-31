@@ -405,6 +405,10 @@ asyncio.run(test())
 - Set `LOG_FORMAT=json` for Loki-compatible JSON logs
 - Default is plain text
 
+**Tracing:**
+- Set `OTEL_EXPORTER_OTLP_ENDPOINT` on both services to export OpenTelemetry spans; unset means off
+- One trace per conversation, across voice and brain. Spans carry no transcript text; log lines carry the `trace_id`
+
 ## Smart Device Compatibility
 
 | Device Type | Protocol | Supported |

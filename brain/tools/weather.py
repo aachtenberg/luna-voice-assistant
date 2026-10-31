@@ -1,4 +1,5 @@
 import httpx
+import tracing
 from config import LOCATION_LAT, LOCATION_LON, LOCATION_CITY
 
 # WMO weather codes to descriptions
@@ -113,4 +114,5 @@ def get_weather() -> str:
         return result
 
     except Exception as e:
+        tracing.mark_error(type(e).__name__)
         return f"Weather error: {e}"

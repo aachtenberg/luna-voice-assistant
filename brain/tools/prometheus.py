@@ -1,4 +1,5 @@
 import httpx
+import tracing
 from config import PROMETHEUS_URL
 
 
@@ -14,6 +15,7 @@ def query_prometheus(query: str) -> str:
         data = response.json()
 
         if data.get("status") != "success":
+            tracing.mark_error("QueryFailed")
             return f"Query failed: {data.get('error', 'Unknown error')}"
 
         results = data.get("data", {}).get("result", [])
@@ -29,4 +31,5 @@ def query_prometheus(query: str) -> str:
 
         return "\n".join(formatted)
     except Exception as e:
+        tracing.mark_error(type(e).__name__)
         return f"Prometheus error: {e}"

@@ -45,6 +45,15 @@ Current date and time: {date_str}, {time_str}
 IMPORTANT: For simple questions like "what time is it?" or "what's the date?", just answer directly using the time above. Do NOT use tools for basic time/date questions."""
 
 
+def chat_attributes(provider: str, model: str) -> dict:
+    """GenAI semconv attributes for a `chat {model}` span, as cfoperator sets them."""
+    return {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": provider,
+        "gen_ai.request.model": model,
+    }
+
+
 def convert_tools_to_anthropic(tools: list) -> list:
     """
     Convert OpenAI-style tool definitions to Anthropic format.

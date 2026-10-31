@@ -1,3 +1,4 @@
+import contextvars
 import hashlib
 import subprocess
 import tempfile
@@ -6,6 +7,7 @@ import re
 import time
 import threading
 import queue
+import tracing
 from config import PIPER_PATH, PIPER_MODEL
 
 # Cache synthesized wavs for short static phrases ("Yes?", "Okay!", ...) so
@@ -66,6 +68,7 @@ def _mute_mic(mute: bool):
         print(f"Mute control error: {e}")
 
 
+@tracing.traced("tts.speak")
 def speak(text: str):
     """Convert text to speech and play it."""
     global _playback_process
@@ -73,6 +76,7 @@ def speak(text: str):
     if not text:
         return
 
+    tracing.annotate({"luna.text.chars": len(text)})
     tmp_path = None
     try:
         # Short phrases come from the synth cache; longer text is synthesized
@@ -143,6 +147,7 @@ def speak_streamed(token_iter, on_first_audio=None, mute_mic=True):
 
     sentence_queue = queue.Queue()
     full_text_parts = []
+    start_time = time.time()
 
     def producer():
         sentence_buffer = ""
@@ -166,7 +171,9 @@ def speak_streamed(token_iter, on_first_audio=None, mute_mic=True):
             sentence_queue.put(remaining)
         sentence_queue.put(None)  # Sentinel
 
-    producer_thread = threading.Thread(target=producer, daemon=True)
+    # In a copy of this context, or the brain call would start a trace of its own
+    producer_thread = threading.Thread(
+        target=contextvars.copy_context().run, args=(producer,), daemon=True)
     producer_thread.start()
 
     first_audio_fired = False
@@ -189,12 +196,15 @@ def speak_streamed(token_iter, on_first_audio=None, mute_mic=True):
                 tmp_path = tmp.name
 
             try:
-                proc = subprocess.run(
-                    [PIPER_PATH, "--model", PIPER_MODEL, "--output_file", tmp_path],
-                    input=cleaned.encode(),
-                    capture_output=True,
-                    timeout=30
-                )
+                with tracing.span("tts.synthesize", {"luna.text.chars": len(cleaned)}):
+                    proc = subprocess.run(
+                        [PIPER_PATH, "--model", PIPER_MODEL, "--output_file", tmp_path],
+                        input=cleaned.encode(),
+                        capture_output=True,
+                        timeout=30
+                    )
+                    if proc.returncode != 0:
+                        tracing.mark_error("PiperFailed")
                 if proc.returncode != 0:
                     continue
 
@@ -202,6 +212,8 @@ def speak_streamed(token_iter, on_first_audio=None, mute_mic=True):
                     if on_first_audio:
                         on_first_audio()
                     first_audio_fired = True
+                    tracing.annotate(
+                        {"luna.time_to_first_audio_ms": int((time.time() - start_time) * 1000)})
 
                 with _playback_lock:
                     # Barge-in/Stop during synthesis: don't start this sentence.
@@ -210,7 +222,8 @@ def speak_streamed(token_iter, on_first_audio=None, mute_mic=True):
                     if _stream_stop.is_set():
                         break
                     play = _playback_process = subprocess.Popen(["pw-play", tmp_path])
-                play.wait(timeout=60)
+                with tracing.span("tts.play"):
+                    play.wait(timeout=60)
             except subprocess.TimeoutExpired:
                 stop_speaking()
             except Exception as e:

@@ -3,7 +3,8 @@
 import inspect
 import json
 from groq import Groq
-from .base import LLMProvider, convert_tools_to_openai
+import tracing
+from .base import LLMProvider, chat_attributes, convert_tools_to_openai
 
 
 class GroqProvider(LLMProvider):
@@ -59,7 +60,15 @@ class GroqProvider(LLMProvider):
                 }]
 
             try:
-                response = self.client.chat.completions.create(**kwargs)
+                with tracing.span(f"chat {self.model}", chat_attributes("groq", self.model), kind="client"):
+                    response = self.client.chat.completions.create(**kwargs)
+                    usage = response.usage
+                    tracing.annotate({
+                        "gen_ai.usage.input_tokens": usage.prompt_tokens if usage else None,
+                        "gen_ai.usage.output_tokens": usage.completion_tokens if usage else None,
+                        "gen_ai.response.finish_reasons": [response.choices[0].finish_reason],
+                        "luna.llm.tool_calls": len(response.choices[0].message.tool_calls or []),
+                    })
             except Exception as e:
                 print(f"Groq error: {e}")
                 # gpt-oss sometimes still emits a tool call with tools removed; Groq

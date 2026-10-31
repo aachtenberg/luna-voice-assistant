@@ -4,7 +4,8 @@ import json
 import re
 import time
 import httpx
-from .base import LLMProvider, convert_tools_to_openai
+import tracing
+from .base import LLMProvider, chat_attributes, convert_tools_to_openai
 from metrics import LLM_CALLS_TOTAL, LLM_DURATION, LLM_ERRORS, TOOL_CALLS_TOTAL, TOOL_DURATION
 
 
@@ -148,6 +149,7 @@ class OllamaProvider(LLMProvider):
                 if not tool_was_called and iteration < self.max_iterations - 1:
                     if self._claims_action_without_tool(content):
                         print(f"[Ollama] Model claimed action without tool call, forcing retry: {content[:100]}")
+                        tracing.event("forced_retry", {"luna.retry.reason": "claimed_action"})
                         messages.append(message)
                         messages.append({
                             "role": "user",
@@ -159,6 +161,7 @@ class OllamaProvider(LLMProvider):
                         continue
                     if self._should_search(content):
                         print(f"[Ollama] Model punted without searching, forcing web_search: {content[:100]}")
+                        tracing.event("forced_retry", {"luna.retry.reason": "punted"})
                         messages.append(message)
                         messages.append({
                             "role": "user",
@@ -168,6 +171,7 @@ class OllamaProvider(LLMProvider):
                         continue
                     if self._promises_action(content):
                         print(f"[Ollama] Model promised action without tool call, forcing retry: {content[:100]}")
+                        tracing.event("forced_retry", {"luna.retry.reason": "promised_action"})
                         messages.append(message)
                         messages.append({
                             "role": "user",
@@ -278,6 +282,7 @@ class OllamaProvider(LLMProvider):
                 if not tool_was_called and iteration < self.max_iterations - 1:
                     if self._claims_action_without_tool(content):
                         print(f"[Ollama] Model claimed action without tool call, forcing retry: {content[:100]}")
+                        tracing.event("forced_retry", {"luna.retry.reason": "claimed_action"})
                         messages.append(message)
                         messages.append({
                             "role": "user",
@@ -289,6 +294,7 @@ class OllamaProvider(LLMProvider):
                         continue
                     if self._should_search(content):
                         print(f"[Ollama] Model punted without searching, forcing web_search: {content[:100]}")
+                        tracing.event("forced_retry", {"luna.retry.reason": "punted"})
                         messages.append(message)
                         messages.append({
                             "role": "user",
@@ -298,6 +304,7 @@ class OllamaProvider(LLMProvider):
                         continue
                     if self._promises_action(content):
                         print(f"[Ollama] Model promised action without tool call, forcing retry: {content[:100]}")
+                        tracing.event("forced_retry", {"luna.retry.reason": "promised_action"})
                         messages.append(message)
                         messages.append({
                             "role": "user",
@@ -335,67 +342,99 @@ class OllamaProvider(LLMProvider):
 
         yield "Sorry, I ran into too many steps trying to answer that."
 
+    @staticmethod
+    def _response_attributes(result: dict) -> dict:
+        """Token counts and Ollama's own timing, from a response or final chunk.
+
+        load_ms is the one to watch on a voice assistant: non-zero means the
+        model was cold and this turn paid to load it.
+        """
+        def ms(key):
+            return int(result[key] / 1_000_000) if result.get(key) is not None else None
+
+        done_reason = result.get("done_reason")
+        return {
+            "gen_ai.usage.input_tokens": result.get("prompt_eval_count"),
+            "gen_ai.usage.output_tokens": result.get("eval_count"),
+            "gen_ai.response.finish_reasons": [done_reason] if done_reason else None,
+            "luna.llm.tool_calls": len(result.get("message", {}).get("tool_calls") or []),
+            "luna.ollama.load_ms": ms("load_duration"),
+            "luna.ollama.prompt_eval_ms": ms("prompt_eval_duration"),
+            "luna.ollama.eval_ms": ms("eval_duration"),
+        }
+
     def _call_ollama_stream(self, messages: list, tools: list):
         """Make a streaming request to Ollama, yielding content tokens."""
         start_time = time.time()
         model = self._resolve_active_model()
-        try:
-            with httpx.stream(
-                "POST",
-                f"{self.url}/api/chat",
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "tools": tools,
-                    "stream": True,
-                    "think": False
-                },
-                timeout=self.timeout
-            ) as response:
-                response.raise_for_status()
-                for line in response.iter_lines():
-                    if not line:
-                        continue
-                    chunk = json.loads(line)
-                    token = chunk.get("message", {}).get("content", "")
-                    if token:
-                        yield token
-                    if chunk.get("done"):
-                        break
-            LLM_CALLS_TOTAL.labels(provider="ollama", model=model).inc()
-            LLM_DURATION.labels(provider="ollama").observe(time.time() - start_time)
-        except httpx.HTTPError as e:
-            LLM_ERRORS.labels(provider="ollama", error_type=type(e).__name__).inc()
-            raise  # propagate to FallbackProvider
-        except Exception as e:
-            print(f"Ollama streaming error: {e}")
-            LLM_ERRORS.labels(provider="ollama", error_type=type(e).__name__).inc()
+        with tracing.detached_span(f"chat {model}", chat_attributes("ollama", model), kind="client") as span:
+            try:
+                with httpx.stream(
+                    "POST",
+                    f"{self.url}/api/chat",
+                    json={
+                        "model": model,
+                        "messages": messages,
+                        "tools": tools,
+                        "stream": True,
+                        "think": False
+                    },
+                    timeout=self.timeout
+                ) as response:
+                    response.raise_for_status()
+                    first_token = True
+                    for line in response.iter_lines():
+                        if not line:
+                            continue
+                        chunk = json.loads(line)
+                        token = chunk.get("message", {}).get("content", "")
+                        if token:
+                            if first_token:
+                                first_token = False
+                                tracing.annotate(
+                                    {"luna.time_to_first_token_ms": int((time.time() - start_time) * 1000)}, span)
+                            yield token
+                        if chunk.get("done"):
+                            tracing.annotate(self._response_attributes(chunk), span)
+                            break
+                LLM_CALLS_TOTAL.labels(provider="ollama", model=model).inc()
+                LLM_DURATION.labels(provider="ollama").observe(time.time() - start_time)
+            except httpx.HTTPError as e:
+                LLM_ERRORS.labels(provider="ollama", error_type=type(e).__name__).inc()
+                raise  # propagate to FallbackProvider
+            except Exception as e:
+                print(f"Ollama streaming error: {e}")
+                LLM_ERRORS.labels(provider="ollama", error_type=type(e).__name__).inc()
+                tracing.mark_error(type(e).__name__, span)
 
     def _call_ollama(self, messages: list, tools: list) -> dict:
         """Make a request to Ollama's chat API."""
         start_time = time.time()
         model = self._resolve_active_model()
-        try:
-            response = httpx.post(
-                f"{self.url}/api/chat",
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "tools": tools,
-                    "stream": False,
-                    "think": False
-                },
-                timeout=self.timeout
-            )
-            response.raise_for_status()
-            result = response.json()
-            LLM_CALLS_TOTAL.labels(provider="ollama", model=model).inc()
-            LLM_DURATION.labels(provider="ollama").observe(time.time() - start_time)
-            return result
-        except httpx.HTTPError as e:
-            LLM_ERRORS.labels(provider="ollama", error_type=type(e).__name__).inc()
-            raise  # propagate to FallbackProvider
-        except Exception as e:
-            print(f"Ollama error: {e}")
-            LLM_ERRORS.labels(provider="ollama", error_type=type(e).__name__).inc()
-            return {}
+        with tracing.span(f"chat {model}", chat_attributes("ollama", model), kind="client"):
+            try:
+                response = httpx.post(
+                    f"{self.url}/api/chat",
+                    json={
+                        "model": model,
+                        "messages": messages,
+                        "tools": tools,
+                        "stream": False,
+                        "think": False
+                    },
+                    timeout=self.timeout
+                )
+                response.raise_for_status()
+                result = response.json()
+                LLM_CALLS_TOTAL.labels(provider="ollama", model=model).inc()
+                LLM_DURATION.labels(provider="ollama").observe(time.time() - start_time)
+                tracing.annotate(self._response_attributes(result))
+                return result
+            except httpx.HTTPError as e:
+                LLM_ERRORS.labels(provider="ollama", error_type=type(e).__name__).inc()
+                raise  # propagate to FallbackProvider
+            except Exception as e:
+                print(f"Ollama error: {e}")
+                LLM_ERRORS.labels(provider="ollama", error_type=type(e).__name__).inc()
+                tracing.mark_error(type(e).__name__)
+                return {}

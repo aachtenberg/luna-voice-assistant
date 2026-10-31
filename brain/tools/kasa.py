@@ -1,6 +1,7 @@
 """Smart light control - Kasa switches and Kasa bulbs."""
 
 import asyncio
+import tracing
 from kasa import (
     Device,
     DeviceConfig,
@@ -89,6 +90,7 @@ async def _control_device(ip: str, action: str) -> str:
         else:
             return f"Unknown action: {action}"
     except Exception as e:
+        tracing.mark_error(type(e).__name__)
         return f"Error controlling device: {e}"
 
 
@@ -170,6 +172,7 @@ def control_light(name: str, action: str, brightness: int = None) -> str:
         if action_lower == "toggle":
             states = _run_async(_control_bulbs(KASA_BULBS[room], "status"))
             if all(s.startswith("error") for s in states):
+                tracing.mark_error("LightsUnreachable")
                 return f"Couldn't reach the {room} lights: {states[0]}"
             action_lower = "off" if any(s.startswith("on") for s in states) else "on"
         if action_lower not in BULB_ACTIONS:
@@ -185,6 +188,7 @@ def control_light(name: str, action: str, brightness: int = None) -> str:
         results = _run_async(_control_bulbs(KASA_BULBS[room], action_lower, bri))
         errors = [r for r in results if r.startswith("error")]
         if errors and len(errors) == len(results):
+            tracing.mark_error("LightsUnreachable")
             return f"Couldn't reach the {room} lights: {errors[0]}"
 
         if action_lower == "on":

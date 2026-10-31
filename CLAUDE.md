@@ -27,6 +27,7 @@ luna-voice-assistant/
 │   ├── main.py              # /ask and /ask/stream endpoints
 │   ├── prompts.py           # System prompt + tool definitions
 │   ├── config.py            # Environment-based configuration
+│   ├── tracing.py           # Opt-in OpenTelemetry spans
 │   ├── llm/                 # Provider implementations + fallback chain
 │   └── tools/               # Tool implementations
 │       ├── web_search.py    # SearXNG
@@ -44,6 +45,7 @@ luna-voice-assistant/
 │   ├── tts.py               # Piper TTS + pw-play
 │   ├── brain_client.py      # HTTP client to brain service
 │   ├── metrics_server.py    # Prometheus /metrics endpoint
+│   ├── tracing.py           # Opt-in OpenTelemetry spans
 │   └── luna-voice.service   # Systemd unit for bare-metal runtime
 └── docs/
     └── broker-topics-known.txt
@@ -161,6 +163,55 @@ this way. On the cluster, the deploy repo's `luna-llm` CLI wraps these calls.
 - TimescaleDB sensor queries working
 - Systemd service for resilient bare-metal voice runtime
 - Structured JSON logging (Loki-compatible)
+- OpenTelemetry tracing, voice to brain to LLM to TTS, into Tempo
+
+## Tracing
+
+One trace per conversation in Tempo, read through Grafana, from the wake word to
+the last sentence played:
+
+```
+conversation                           luna-voice; luna.outcome, luna.wake.score
+├─ tts.speak                           the "Yes?"
+├─ audio.record
+│  └─ stt.warmup
+├─ stt.transcribe                      luna.stt.filtered = hallucination dropped
+└─ answer                              luna.time_to_first_audio_ms, luna.barged_in
+   ├─ brain.ask_stream ─ traceparent ─► POST /ask/stream     luna-brain
+   │                                    ├─ chat <model>      tokens, luna.ollama.load_ms
+   │                                    ├─ execute_tool <tool>
+   │                                    └─ chat <model>      luna.time_to_first_token_ms
+   └─ tts.synthesize, tts.play         one pair per sentence
+```
+
+Useful TraceQL: `{ name = "conversation" && span.luna.outcome != "answered" }`,
+`{ span.luna.ollama.load_ms > 1000 }` (cold model), `{ span.gen_ai.tool.name != nil && status = error }`.
+
+**On/off**: `OTEL_EXPORTER_OTLP_ENDPOINT` set means on, unset means off and the SDK
+is never imported. Direct OTLP/HTTP to Tempo on 4318, no collector. The brain uses
+Tempo's cluster DNS name; voice uses its ClusterIP, as host DNS can't resolve it.
+
+**Rules** (same as cfoperator, whose attribute names these match):
+- **Shapes, not text.** Models, tokens, tool names, durations, lengths. Never a
+  transcript, prompt, response, tool argument or tool output; exceptions record
+  the class only. The text stays in the logs, and every log line inside a trace
+  ends in `trace_id=<id>`, so a trace still leads to it.
+- **Only `tracing.py` names `opentelemetry`.**
+- **Not `span()` across a `yield`.** Use `detached_span()`: Starlette resumes sync
+  generators on pool threads, so a current span would detach in the wrong context.
+- **A new thread starts outside the trace.** To join it, run the target under
+  `contextvars.copy_context().run`, as `speak_streamed` does.
+- **Tools report failure as return strings**, so call `tracing.mark_error()`
+  beside them or the span shows success.
+
+FastAPI (>=0.162) makes the server span itself once a provider exists; `main.py`
+only turns off its per-operation spans and excludes `/health` and `/metrics`.
+A barge-in hangs up on the brain, so its server span reads ERROR
+`error.type=ConnectionError`. That is the disconnect, not a fault; the voice side's
+`luna.outcome=barged_in` says which it was.
+
+Metrics stay on Prometheus and logs on Loki. Tempo derives span metrics into
+Prometheus as `traces_spanmetrics_*`.
 
 ## USB Audio Setup (Anker PowerConf S330)
 
@@ -198,6 +249,7 @@ Both services use `.env` files (not committed, see `.env.example`):
 - SEARXNG_URL (cluster-internal: `searxng.ai.svc.cluster.local`)
 - MQTT_BROKER (cluster-internal: `mosquitto.iot.svc.cluster.local`)
 - LOCATION_CITY, LOCATION_REGION, LOCATION_COUNTRY, LOCATION_TIMEZONE, LOCATION_LAT, LOCATION_LON
+- OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_RESOURCE_ATTRIBUTES (see Tracing)
 - Secrets via k8s Secret `luna-brain-secrets`
 
 These env vars are **startup defaults**. The provider/model routing fields
@@ -218,6 +270,7 @@ VAD_THRESHOLD=0.0
 STREAMING_STT_ENABLED=true
 BARGE_IN_ENABLED=true
 BARGE_IN_DEVICE=luna_barge
+OTEL_EXPORTER_OTLP_ENDPOINT=http://<tempo-clusterip>:4318
 ```
 
 ## Barge-in and Stop

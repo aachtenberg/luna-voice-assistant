@@ -1,4 +1,5 @@
 import httpx
+import tracing
 from config import SEARXNG_URL
 
 
@@ -19,6 +20,7 @@ def web_search(query: str) -> str:
             # rephrasing the query until it runs out of tool turns.
             down = [e[0] for e in data.get("unresponsive_engines", []) if e]
             if down:
+                tracing.mark_error("SearchEnginesBlocked")
                 return ("Web search is unavailable right now (search engines are "
                         f"blocking requests: {', '.join(down)}). Do not search again; "
                         "tell the user you can't look that up at the moment.")
@@ -32,4 +34,5 @@ def web_search(query: str) -> str:
 
         return "\n".join(summaries)
     except Exception as e:
+        tracing.mark_error(type(e).__name__)
         return f"Search error: {e}"
