@@ -48,6 +48,7 @@ luna-voice-assistant/
 │   ├── metrics_server.py    # Prometheus /metrics endpoint
 │   ├── tracing.py           # Opt-in OpenTelemetry spans
 │   └── luna-voice.service   # Systemd unit for bare-metal runtime
+├── benchmarks/               # Local model tests and their results
 └── docs/
     └── broker-topics-known.txt
 ```
