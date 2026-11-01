@@ -8,14 +8,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-**k3s cluster with 5 nodes:**
-- **raspberrypi** (192.168.0.167) — control-plane, primary
-- **raspberrypi2** (192.168.0.146) — apps workloads
-- **raspberrypi3** (192.168.0.111) — control-plane, runs luna-brain pod
-- **raspberrypi4** (192.168.0.116) — control-plane
-- **headless-gpu** (192.168.0.150) — GPU node (AMD RX 7900 XT), runs Ollama/faster-whisper/SearXNG
+**k3s cluster with 8 nodes.** The ones Luna uses:
+- **raspberrypi3** — control-plane, runs the luna-brain pod
+- **raspberrypi5** (192.168.0.216) — voice service, bare metal
+- **aa-ubuntu-01** (192.168.0.46) — 2x RX 9070 XT, 16 GB each. Card 1 (Ollama on port 11435) runs all of Luna's inference. Card 0 (port 11434) is cfoperator's triage: leave it alone
+- **headless-gpu** (192.168.0.150) — RX 7900 XT, runs faster-whisper and SearXNG, and cfoperator's production Ollama
 
-**Voice service** runs bare metal on raspberrypi3 (not containerized — requires USB audio hardware access).
+**Voice service** runs bare metal on raspberrypi5 (not containerized — requires USB audio hardware access).
 
 **Data flow**: Wake word → Audio capture → Whisper transcription (k3s) → Brain/LLM (k3s) → TTS response (local Piper) → Playback
 
@@ -71,9 +70,9 @@ luna-voice-assistant/
 
 | Service | Host | Purpose |
 |---------|------|---------|
-| Piper TTS | raspberrypi3 | Local binary ~/piper/piper |
-| Voice assistant | raspberrypi3 | Wake word + audio + TTS |
-| Ollama | 192.168.0.150 | LLM inference (qwen2.5:14b) |
+| Piper TTS | raspberrypi5 | Local binary ~/piper/piper |
+| Voice assistant | raspberrypi5 | Wake word + audio + TTS |
+| Ollama | aa-ubuntu-01, port 11435 | All LLM inference (gemma4:12b), Groq as fallback |
 
 The old bare-metal TimescaleDB (192.168.0.146:5433) is retired; sensor data
 lives in the k3s `timescaledb` StatefulSet (`timescaledb.data.svc.cluster.local:5432`,
@@ -82,7 +81,7 @@ db `sensors`, user `telegraf`).
 ## Commands
 
 ```bash
-# Start voice assistant (bare metal on raspberrypi3)
+# Start voice assistant (bare metal on raspberrypi5)
 cd voice && source venv/bin/activate && python main.py
 
 # Brain is a k3s deployment — manage via kubectl
@@ -142,6 +141,17 @@ The override persists to `LLM_OVERRIDE_PATH` (default `/app/data/llm_override.js
 on the mounted data volume) so it survives restarts. API keys are never settable
 this way. On the cluster, the deploy repo's `luna-llm` CLI wraps these calls.
 
+## Local inference
+
+`gemma4:12b` on aa-ubuntu-01 card 1 serves every turn, and Groq only answers when it
+can't. Results and how to test another model: `benchmarks/local-models-2026-11.md`.
+The instance is the `ollama-bench` service. Its settings are host state, in
+`/etc/systemd/system/ollama-bench.service.d/luna.conf`, in no repo:
+
+- `OLLAMA_CONTEXT_LENGTH=8192`: the brain sends no `num_ctx`, and at this card's
+  default of 4096 a long turn stops mid-sentence.
+- `OLLAMA_KEEP_ALIVE=-1`: a voice turn can't wait for a cold load.
+
 ## Sensor Data Schema
 
 **Database**: `sensors`
@@ -153,9 +163,9 @@ this way. On the cluster, the deploy repo's `luna-llm` CLI wraps these calls.
 
 ### ✅ Completed
 - k3s cluster deployment (brain, faster-whisper, searxng, mosquitto, monitoring)
-- Brain service with Ollama tool calling (qwen2.5:14b via OLLAMA_AUTO_MODEL)
+- Brain service with Ollama tool calling (gemma4:12b)
 - Tools: web_search, query_timescaledb, query_prometheus, mqtt_publish, timers, weather, light control
-- LLM fallback chain: Ollama → Groq → Anthropic (FallbackProvider)
+- LLM fallback chain: Ollama → Groq (FallbackProvider). Anthropic is out of the chain: too expensive for this
 - Runtime LLM switching via `/admin/provider` (persisted override, survives restarts)
 - GitOps CI/CD: push → GH Actions arm64 build → GHCR → deploy-repo bump → ArgoCD
 - Voice service with OpenWakeWord ("hey luna"), Whisper, Piper TTS
@@ -227,22 +237,22 @@ curl -X POST http://<brain>:8000/admin/probe   # run every check once, now
 | Check | What it does | What it catches | What it misses |
 |-------|--------------|-----------------|----------------|
 | `groq` | Lists models, no tokens | Bad key, outage, retired model | Spent quota |
-| `ollama` | Lists installed models, nothing loaded | Server down, model not pulled | A model that won't run |
+| `ollama` | Lists installed models, then a short real chat | Server down, model not pulled, model that won't run | |
 | `search` | One SearXNG query | Empty results, engines blocked, SearXNG down | |
 
 Anthropic isn't checked: it isn't funded, so it would only ever fail. Results go to
 `brain_probe_success`, `brain_probe_duration_seconds` and
 `brain_probe_last_run_timestamp_seconds`, labelled by `check`, and failures to the log.
 
-**No timer yet, on purpose.** `PROBE_INTERVAL_SECONDS` defaults to 0: no thread, no
-calls, no metrics. It stays 0 until a local model does all the inference. Then, in
-the deploy repo, set:
+**On a timer**, set in the deploy repo: `PROBE_INTERVAL_SECONDS=900`, and search every
+`PROBE_SEARCH_INTERVAL_SECONDS` (3600), as each query spends search engine quota.
+`PROBE_OLLAMA_HELLO=true` is the short real chat; keep it off on a GPU Luna shares,
+as it loads the model and could evict someone else's. With the interval unset there
+is no thread, no calls and no metrics. They run on a timer only because inference is
+local. If it stops being local, take the timer off rather than spend credits on it.
 
-- `PROBE_INTERVAL_SECONDS=900`.
-- `PROBE_OLLAMA_HELLO=true`, which adds a real chat a few tokens long to `ollama`,
-  catching a model that won't run. Only on a GPU Luna doesn't share: the hello loads
-  the model and could evict someone else's.
-- `PROBE_SEARCH_INTERVAL_SECONDS` stays at 3600. Each query spends search engine quota.
+Alerts are the `luna_health` group in homelab-infra's `alert_rules.yml`. The health
+row is at the top of the *Luna — Traces* board in Grafana.
 
 **Rules**: never send a prompt to a paid provider from a probe, and never go through
 `/ask`, which writes to the one history every conversation shares.
