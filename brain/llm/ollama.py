@@ -257,20 +257,27 @@ class OllamaProvider(LLMProvider):
             can_stream = tool_was_called or iteration == self.max_iterations - 1
 
             if can_stream:
-                # Stream this call — yield tokens as they arrive
-                for token in self._call_ollama_stream(messages, use_tools):
+                # Stream this call — yield tokens as they arrive. The model may
+                # still want another tool here: a model that calls them one at a
+                # time sends the next one on this round.
+                tool_calls = []
+                content = ""
+                for token in self._call_ollama_stream(messages, use_tools, tool_calls):
+                    content += token
                     yield token
-                return
+                if not tool_calls:
+                    return
+                message = {"role": "assistant", "content": content, "tool_calls": tool_calls}
+            else:
+                # Non-streaming for early iterations where tools may be called
+                response = self._call_ollama(messages, use_tools)
+                if not response:
+                    yield "Sorry, I couldn't process that request."
+                    return
 
-            # Non-streaming for early iterations where tools may be called
-            response = self._call_ollama(messages, use_tools)
-            if not response:
-                yield "Sorry, I couldn't process that request."
-                return
-
-            message = response.get("message", {})
-            tool_calls = message.get("tool_calls")
-            content = message.get("content", "")
+                message = response.get("message", {})
+                tool_calls = message.get("tool_calls")
+                content = message.get("content", "")
 
             if not tool_calls and content:
                 parsed = self._parse_tool_from_content(content)
@@ -363,8 +370,9 @@ class OllamaProvider(LLMProvider):
             "luna.ollama.eval_ms": ms("eval_duration"),
         }
 
-    def _call_ollama_stream(self, messages: list, tools: list):
-        """Make a streaming request to Ollama, yielding content tokens."""
+    def _call_ollama_stream(self, messages: list, tools: list, tool_calls: list = None):
+        """Make a streaming request to Ollama, yielding content tokens. Any tool
+        calls the model makes instead are added to tool_calls."""
         start_time = time.time()
         model = self._resolve_active_model()
         with tracing.detached_span(f"chat {model}", chat_attributes("ollama", model), kind="client") as span:
@@ -394,6 +402,8 @@ class OllamaProvider(LLMProvider):
                                 tracing.annotate(
                                     {"luna.time_to_first_token_ms": int((time.time() - start_time) * 1000)}, span)
                             yield token
+                        if tool_calls is not None:
+                            tool_calls.extend(chunk.get("message", {}).get("tool_calls") or [])
                         if chunk.get("done"):
                             tracing.annotate(self._response_attributes(chunk), span)
                             break
