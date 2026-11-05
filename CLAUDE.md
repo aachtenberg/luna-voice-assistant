@@ -329,6 +329,8 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://<tempo-clusterip>:4318
   `Barge-in monitor: ... max wake score` log line shows how close detection came.
 - **Stop without the wake word**: the kiosk's Stop button, `curl -X POST http://<voice-host>:8001/stop`,
   or any MQTT message on `voice-assistant/stop` cuts TTS and returns to wake-word listening.
+  It also cuts a timer announcement mid-clip and skips its remaining rounds; timers
+  still queued behind it are announced next.
 
 ## Location Context
 

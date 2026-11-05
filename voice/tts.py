@@ -248,6 +248,7 @@ def stop_speaking():
     """Stop any ongoing TTS playback (for barge-in)."""
     global _playback_process
     _stream_stop.set()  # Also stop streamed TTS pipeline
+    _announce_stop.set()  # And a timer announcement
 
     with _playback_lock:
         if _playback_process is not None:
@@ -330,15 +331,45 @@ def stop_thinking_loop():
         _thinking_thread = None
 
 
+# Set by stop_speaking(); announce_timer() checks it between every step
+_announce_stop = threading.Event()
+
+
+def _announce_play(wav_path: str, timeout: float) -> bool:
+    """Play one clip of an announcement where stop_speaking() can reach it.
+
+    Returns False if a stop arrived, before or during playback.
+    """
+    global _playback_process
+    with _playback_lock:
+        # Checked under the lock stop_speaking() takes, so a stop either
+        # lands here or terminates the process we start.
+        if _announce_stop.is_set():
+            return False
+        play = _playback_process = subprocess.Popen(["pw-play", wav_path])
+    try:
+        play.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        play.kill()
+    finally:
+        with _playback_lock:
+            if _playback_process is play:
+                _playback_process = None
+    return not _announce_stop.is_set()
+
+
 def announce_timer(message: str, repeats: int = 3, pause: float = 2.0):
     """
     Announce a timer with sound and repeated message.
+
+    A stop (stop_speaking) cuts the clip that is playing and skips the rest.
 
     Args:
         message: The announcement text
         repeats: Number of times to repeat the announcement
         pause: Seconds to pause between repeats
     """
+    _announce_stop.clear()
     # Mute mic during entire announcement sequence
     _mute_mic(True)
 
@@ -346,12 +377,16 @@ def announce_timer(message: str, repeats: int = 3, pause: float = 2.0):
         # Pattern: 3 bings, message, pause, 3 bings, message, pause, 3 bings, message
         for i in range(repeats):
             # Play 3 bings before each announcement
-            for _ in range(3):
-                play_alert_sound()
-                time.sleep(0.5)
+            if os.path.exists(ALERT_SOUND):
+                for _ in range(3):
+                    if not _announce_play(ALERT_SOUND, timeout=5):
+                        return
+                    if _announce_stop.wait(0.5):
+                        return
 
             # Wait for bings to finish before speaking
-            time.sleep(0.8)
+            if _announce_stop.wait(0.8):
+                return
 
             # Generate and play speech
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -365,16 +400,18 @@ def announce_timer(message: str, repeats: int = 3, pause: float = 2.0):
                     timeout=30
                 )
 
-                if process.returncode == 0:
-                    subprocess.run(["pw-play", tmp_path], timeout=30)
+                if process.returncode == 0 and not _announce_play(tmp_path, timeout=30):
+                    return
 
             finally:
                 if os.path.exists(tmp_path):
                     os.unlink(tmp_path)
 
             # Pause between repeats (except after last one)
-            if i < repeats - 1:
-                time.sleep(pause)
+            if i < repeats - 1 and _announce_stop.wait(pause):
+                return
 
     finally:
+        if _announce_stop.is_set():
+            print("Timer announcement stopped")
         _mute_mic(False)

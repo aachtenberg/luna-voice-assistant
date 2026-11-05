@@ -283,20 +283,23 @@ def main():
                     cooldown_remaining = COOLDOWN_CHUNKS
                     continue
 
-                # Check for timer announcements
+                # Check for timer announcements. Pop under the lock, speak
+                # outside it: on_mqtt_message runs on paho's network thread,
+                # and holding the lock through ~10 s of speech would stall
+                # keepalives and every MQTT message, including stop.
                 with timer_lock:
-                    if timer_announcements:
-                        announcement = timer_announcements.pop(0)
-                        log.info(f"Announcing timer: {announcement}", extra={"event": "timer_announce"})
-                        stop_thinking_loop()  # Safety: stop any leftover thinking sounds
-                        recorder.close_stream()
-                        TTS_REQUESTS.inc()
-                        announce_timer(announcement, repeats=3, pause=3.0)
-                        time.sleep(AUDIO_SETTLE_PAUSE)
-                        detector.reset()
-                        recorder.open_stream(flush_buffer=True)
-                        cooldown_remaining = COOLDOWN_CHUNKS
-                        continue
+                    announcement = timer_announcements.pop(0) if timer_announcements else None
+                if announcement is not None:
+                    log.info(f"Announcing timer: {announcement}", extra={"event": "timer_announce"})
+                    stop_thinking_loop()  # Safety: stop any leftover thinking sounds
+                    recorder.close_stream()
+                    TTS_REQUESTS.inc()
+                    announce_timer(announcement, repeats=3, pause=3.0)
+                    time.sleep(AUDIO_SETTLE_PAUSE)
+                    detector.reset()
+                    recorder.open_stream(flush_buffer=True)
+                    cooldown_remaining = COOLDOWN_CHUNKS
+                    continue
 
                 # Skip wake word detection during cooldown period
                 if cooldown_remaining > 0:
